@@ -30,18 +30,28 @@ from app.transcriber.diarization import assign_speakers, diarize
 
 
 # ---------------------------------------------------------------------------
-# Ensure model is loaded at import time (worker boot).
+# Model warm-up — called lazily on first job, NOT at import time.
+#
+# Rationale: RQ imports app.worker before the worker registers with Redis.
+# If warm-up runs at import time and takes several minutes (large model
+# download) or crashes, the worker process dies before it ever picks up a
+# job and the queue stays stuck forever.
 # ---------------------------------------------------------------------------
+_warmed_up = False
+
+
 def _warm_up():
-    """Pre-load expensive models so the first job doesn't pay the cost."""
+    """Pre-load expensive models so the first job doesn't pay the full cost."""
+    global _warmed_up
+    if _warmed_up:
+        return
     try:
+        logger.info("Warming up Whisper model …")
         load_model()
+        _warmed_up = True
+        logger.info("Whisper model ready ✅")
     except Exception as exc:
-        logger.error(f"Model warm-up failed: {exc}")
-
-
-# Called when the worker module is imported (once per process)
-_warm_up()
+        logger.error(f"Model warm-up failed (will retry on next job): {exc}")
 
 
 # ---------------------------------------------------------------------------
@@ -51,6 +61,10 @@ _warm_up()
 def process_job(job_id: str) -> None:
     """Top-level handler invoked by RQ for each queued job."""
     logger.info(f"[{job_id}] Starting job")
+
+    # Lazy warm-up: load model on first job (not at import time)
+    _warm_up()
+
     cfg = get_config()
 
     try:
