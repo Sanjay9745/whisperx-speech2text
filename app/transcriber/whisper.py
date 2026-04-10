@@ -1,6 +1,6 @@
 """
 Faster-Whisper transcription engine.
-Model is loaded ONCE and reused across all jobs.
+Model is loaded ONCE per worker process and reused across all jobs.
 Supports auto CUDA detection, FP16 / INT8 fallback.
 """
 
@@ -24,7 +24,7 @@ _model: Optional[WhisperModel] = None
 
 
 def _detect_device_and_dtype() -> Tuple[str, str]:
-    """Return (device, compute_type) after probing hardware."""
+    """Return (device, compute_type) after probing available hardware."""
     cfg = get_config()
     device = cfg.model.device
     compute_type = cfg.model.compute_type
@@ -34,11 +34,10 @@ def _detect_device_and_dtype() -> Tuple[str, str]:
         device = "cpu"
         compute_type = "int8"
     elif device == "cuda":
-        # Verify FP16 support
         cap = torch.cuda.get_device_capability()
         if cap[0] < 7 and compute_type == "float16":
             logger.warning(
-                f"GPU compute capability {cap} < 7.0 — using int8 instead of float16"
+                f"GPU compute capability {cap} < 7.0 — switching to int8 instead of float16"
             )
             compute_type = "int8"
 
@@ -74,19 +73,18 @@ def load_model() -> WhisperModel:
 
 
 # ---------------------------------------------------------------------------
-# Transcribe a single audio chunk (numpy or file path)
+# Transcribe a single audio chunk
 # ---------------------------------------------------------------------------
 
-
 def transcribe_chunk(
-    audio: np.ndarray | str,
+    audio: "np.ndarray | str",
     *,
     language: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Transcribe a single audio chunk.
     *audio* may be a numpy float32 array (16 kHz mono) or a file path.
-    Returns dict with keys: text, segments, language.
+    Returns dict with keys: text, segments, language, language_probability.
     """
     cfg = get_config()
     model = load_model()
@@ -97,11 +95,14 @@ def transcribe_chunk(
         best_of=cfg.accuracy.best_of,
         temperature=cfg.accuracy.temperature,
         language=language,
-        vad_filter=False,  # we handle VAD externally
+        # batch_size controls how many chunks are fed to the CTranslate2 engine
+        # at once; this is different from the audio-level chunking we do above.
+        batch_size=cfg.performance.batch_size,
+        vad_filter=False,       # VAD is handled externally (chunker.py)
         word_timestamps=True,
     )
 
-    segments = []
+    segments: List[Dict[str, Any]] = []
     full_text_parts: List[str] = []
 
     for seg in segments_iter:

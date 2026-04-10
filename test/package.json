@@ -1,0 +1,19 @@
+{
+  "name": "speech2text-api-test",
+  "version": "2.0.0",
+  "description": "Test client and webhook receiver for the Speech-to-Text API",
+  "type": "module",
+  "scripts": {
+    "test"           : "node test_api.js",
+    "webhook-server" : "node webhook_server.js",
+    "test:with-webhook": "node webhook_server.js & sleep 1 && node test_api.js"
+  },
+  "dependencies": {
+    "axios"    : "^1.7.7",
+    "express"  : "^4.21.1",
+    "form-data": "^4.0.1"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

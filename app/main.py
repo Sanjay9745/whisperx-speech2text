@@ -49,7 +49,10 @@ app.add_middleware(APIKeyMiddleware)
 async def _startup():
     cfg = get_config()
     cfg.paths.ensure_dirs()
-    logger.info("API started — directories ensured, config loaded")
+    logger.info(
+        f"API started — model={cfg.model.size}, device={cfg.model.device}, "
+        f"compute_type={cfg.model.compute_type}"
+    )
 
 
 # ---------------------------------------------------------------------------

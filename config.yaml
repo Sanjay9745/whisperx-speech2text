@@ -1,38 +1,109 @@
+# =============================================================================
+# config.yaml — Speech-to-Text API Configuration
+#
+# Every value here can be overridden with an environment variable.
+# See .env.example for the full list of supported WHISPER_* env vars.
+#
+# Priority:  ENV VAR  >  config.yaml  >  code defaults
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Model settings
+# Env overrides: WHISPER_MODEL_SIZE | WHISPER_DEVICE | WHISPER_COMPUTE_TYPE
+#                WHISPER_DOWNLOAD_ROOT
+# ---------------------------------------------------------------------------
 model:
+  # Whisper model size: tiny | base | small | medium | large-v2 | large-v3
   size: large-v2
+
+  # Device to run on: cuda | cpu
+  # The code will auto-fall back to CPU + int8 if CUDA is unavailable.
   device: cuda
+
+  # Precision:  float16  (GPU, fast) | int8  (CPU or low-VRAM GPU) | float32
   compute_type: float16
+
+  # Local directory to cache downloaded model weights.
+  # On Colab: set to /content/models so they survive across notebook re-runs.
   download_root: ./models
 
+# ---------------------------------------------------------------------------
+# Performance
+# Env overrides: WHISPER_BATCH_SIZE | WHISPER_MAX_WORKERS
+#                WHISPER_CHUNK_DURATION | WHISPER_USE_VAD
+# ---------------------------------------------------------------------------
 performance:
+  # Number of audio chunks sent to the model at once.
+  # Colab T4: 8-16 is safe for large-v2; reduce if you hit OOM.
   batch_size: 16
-  max_workers: 4
-  chunk_duration_sec: 20
+
+  # Maximum parallel transcription threads inside one worker process.
+  # Keep at 1 on single-GPU Colab to avoid memory contention.
+  max_workers: 1
+
+  # Maximum length of one audio chunk in seconds before splitting.
+  chunk_duration_sec: 30
+
+  # Use Silero-VAD to detect speech before chunking (strongly recommended).
   use_vad: true
+
+  # Soft-limit: log a warning when the queue exceeds this length.
   queue_soft_limit: 10000
+
+  # Hard-limit: reject new jobs when queue reaches this length. null = no limit.
   queue_hard_limit: null
 
+# ---------------------------------------------------------------------------
+# Accuracy
+# Env overrides: WHISPER_BEAM_SIZE | WHISPER_TEMPERATURE | WHISPER_BEST_OF
+# ---------------------------------------------------------------------------
 accuracy:
   beam_size: 5
   temperature: 0.0
   best_of: 5
 
+# ---------------------------------------------------------------------------
+# Speaker diarization (pyannote.audio)
+# Env overrides: WHISPER_DIARIZATION_ENABLED | WHISPER_HF_TOKEN
+#
+# !! IMPORTANT: You MUST set WHISPER_HF_TOKEN (or fill hf_token below)
+#    with a Hugging Face token that has accepted the pyannote model terms:
+#    https://huggingface.co/pyannote/speaker-diarization-3.1
+# ---------------------------------------------------------------------------
 diarization:
   enabled: true
+  # Paste your HF token here OR export WHISPER_HF_TOKEN=<token> in the shell.
+  # Never commit a real token to version control — use the env var instead.
   hf_token: ""
 
+# ---------------------------------------------------------------------------
+# Webhook delivery
+# Env overrides: WHISPER_WEBHOOK_ENABLED | WHISPER_WEBHOOK_TIMEOUT
+#                WHISPER_WEBHOOK_RETRY_COUNT
+# ---------------------------------------------------------------------------
 webhook:
   enabled: true
-  timeout_sec: 10
+  timeout_sec: 15
   retry_count: 3
 
+# ---------------------------------------------------------------------------
+# API security
+# Env overrides: WHISPER_API_KEY_ENABLED | WHISPER_API_KEYS (comma-separated)
+#
+# !! IMPORTANT: Replace the placeholder keys below or use WHISPER_API_KEYS.
+# ---------------------------------------------------------------------------
 security:
   api_key_enabled: true
   api_keys:
-    - "your-secret-key-1"
-    - "your-secret-key-2"
+    - "change-me-key-1"
+    - "change-me-key-2"
 
+# ---------------------------------------------------------------------------
+# File system paths
+# Env overrides: WHISPER_UPLOAD_DIR | WHISPER_OUTPUT_DIR | WHISPER_TEMP_DIR
+# ---------------------------------------------------------------------------
 paths:
+  # On Colab use absolute paths under /content to avoid permission issues.
   upload_dir: ./uploads
   output_dir: ./outputs
   temp_dir: ./temp

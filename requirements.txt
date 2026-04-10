@@ -1,36 +1,67 @@
+# =============================================================================
+# requirements.txt — Speech-to-Text API
+#
+# NOTE: WhisperX is NOT listed here because it conflicts with the system
+# torch version. It must be installed separately AFTER torch:
+#
+#   pip install --no-deps git+https://github.com/m-bain/whisperX.git@v3.3.1
+#
+# See colab_setup.sh and the Colab notebook for the correct install order.
+# =============================================================================
+
 # --- Core Framework ---
-fastapi>=0.115.0
-uvicorn[standard]>=0.30.0
-python-multipart>=0.0.9
+fastapi==0.115.5
+uvicorn[standard]==0.32.1
+python-multipart==0.0.12
 
 # --- Queue & Cache ---
-redis==5.0.8
-rq==1.16.2
+redis==5.2.0
+rq==2.0.0
 
 # --- Audio Processing ---
-# WhisperX currently requires faster-whisper>=1.2.0.
-faster-whisper==1.2.0
+# faster-whisper must match your torch/ctranslate2 build.
+# ctranslate2 3.x => torch 2.x  (works on CUDA 12.x)
+faster-whisper==1.1.0
+ctranslate2==4.4.0
+
+# silero-vad from PyPI (not the torch.hub version to avoid network calls at runtime)
 silero-vad==5.1.2
+
 pydub==0.25.1
-soundfile==0.13.1
+soundfile==0.12.1
+# librosa 0.10.x works with numpy <2.0 AND >=2.0 via lazy compat shims
 librosa==0.10.2.post1
 
 # --- Speaker Diarization ---
-pyannote.audio>=3.3.2
+# pyannote.audio 3.3.x is the last release compatible with torch 2.x
+pyannote.audio==3.3.2
+pyannote.core==5.0.0
+pyannote.pipeline==3.0.1
 
-# --- Additional WhisperX deps ---
-pandas
-nltk
+# --- WhisperX runtime deps (installed independently of whisperx itself) ---
+pandas==2.2.3
+nltk==3.9.1
+
+# --- Hugging Face Hub ---
+# pin below 0.26 to avoid breaking pyannote token auth
+huggingface-hub==0.25.2
+tokenizers==0.20.3
+transformers==4.46.3
 
 # --- Configuration ---
 pyyaml==6.0.2
 
 # --- HTTP ---
-httpx==0.28.1
+httpx==0.27.2
 aiofiles==24.1.0
 
 # --- Utilities ---
-numpy>=2.1.0
+# numpy 1.x is required by librosa + pyannote on Python 3.10/3.11.
+# numpy 2.x breaks several downstream C extensions. Keep at 1.26.x.
+numpy==1.26.4
+# torch/torchaudio must be installed via --index-url (see colab_setup.sh).
+# List them here so pip freeze / dependency checkers are aware of the versions,
+# but the CUDA wheel must be pulled from the PyTorch index separately.
 torch==2.5.1
 torchaudio==2.5.1
 
