@@ -1,0 +1,38 @@
+model:
+  size: large-v2
+  device: cuda
+  compute_type: float16
+  download_root: ./models
+
+performance:
+  batch_size: 16
+  max_workers: 4
+  chunk_duration_sec: 20
+  use_vad: true
+  queue_soft_limit: 10000
+  queue_hard_limit: null
+
+accuracy:
+  beam_size: 5
+  temperature: 0.0
+  best_of: 5
+
+diarization:
+  enabled: true
+  hf_token: ""
+
+webhook:
+  enabled: true
+  timeout_sec: 10
+  retry_count: 3
+
+security:
+  api_key_enabled: true
+  api_keys:
+    - "your-secret-key-1"
+    - "your-secret-key-2"
+
+paths:
+  upload_dir: ./uploads
+  output_dir: ./outputs
+  temp_dir: ./temp

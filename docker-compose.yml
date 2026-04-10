@@ -1,0 +1,92 @@
+# ============================================================================
+# docker-compose.yml — Speech-to-Text (GPU)
+#
+# Services:
+#   api     – FastAPI application (uvicorn)
+#   worker  – RQ worker(s) for transcription
+#   redis   – Job queue & state store
+# ============================================================================
+
+version: "3.9"
+
+x-gpu: &gpu
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: all
+            capabilities: [gpu]
+
+services:
+  # ------------------------------------------------------------------
+  # Redis
+  # ------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --maxmemory 4gb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------
+  # API
+  # ------------------------------------------------------------------
+  api:
+    build: .
+    <<: *gpu
+    ports:
+      - "8000:8000"
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - WHISPER_DEVICE=cuda
+    volumes:
+      - ./models:/app/models
+      - ./uploads:/app/uploads
+      - ./outputs:/app/outputs
+      - ./temp:/app/temp
+      - ./config.yaml:/app/config.yaml
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    command: >
+      uvicorn app.main:app
+        --host 0.0.0.0
+        --port 8000
+        --workers 1
+        --log-level info
+
+  # ------------------------------------------------------------------
+  # Worker (can scale horizontally)
+  # ------------------------------------------------------------------
+  worker:
+    build: .
+    <<: *gpu
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - WHISPER_DEVICE=cuda
+    volumes:
+      - ./models:/app/models
+      - ./uploads:/app/uploads
+      - ./outputs:/app/outputs
+      - ./temp:/app/temp
+      - ./config.yaml:/app/config.yaml
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    command: >
+      rq worker transcription
+        --url redis://redis:6379/0
+        --with-scheduler
+
+volumes:
+  redis_data:

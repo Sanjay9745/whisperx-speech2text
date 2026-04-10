@@ -1,0 +1,35 @@
+# --- Core Framework ---
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+python-multipart==0.0.20
+
+# --- Queue & Cache ---
+redis==5.2.1
+rq==2.1.0
+
+# --- Audio Processing ---
+# WhisperX currently requires faster-whisper>=1.2.0.
+faster-whisper==1.2.0
+whisperx @ git+https://github.com/m-bain/whisperX.git@v3.7.9
+silero-vad==5.1.2
+pydub==0.25.1
+soundfile==0.13.1
+librosa==0.10.2.post1
+
+# --- Speaker Diarization ---
+pyannote.audio==3.3.2
+
+# --- Configuration ---
+pyyaml==6.0.2
+
+# --- HTTP ---
+httpx==0.28.1
+aiofiles==24.1.0
+
+# --- Utilities ---
+numpy>=2.1.0
+torch==2.5.1
+torchaudio==2.5.1
+
+# --- Logging ---
+loguru==0.7.3
