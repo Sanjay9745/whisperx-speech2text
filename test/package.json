@@ -6,13 +6,16 @@
   "scripts": {
     "test"             : "node test_api.js",
     "webhook-server"   : "node webhook_server.js",
+    "webhook-public"   : "node webhook_server.js --tunnel",
     "test:with-webhook": "node webhook_server.js & sleep 1 && node test_api.js",
-    "ui"               : "npx serve . -p 3000 --no-clipboard"
+    "test:public"      : "node run_public_test.js",
+    "ui"               : "node webhook_server.js --tunnel"
   },
   "dependencies": {
-    "axios"    : "^1.7.7",
-    "express"  : "^4.21.1",
-    "form-data": "^4.0.1"
+    "axios"       : "^1.7.7",
+    "express"     : "^4.21.1",
+    "form-data"   : "^4.0.1",
+    "localtunnel" : "^2.0.2"
   },
   "engines": {
     "node": ">=18.0.0"
