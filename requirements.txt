@@ -1,11 +1,11 @@
 # --- Core Framework ---
-fastapi==0.115.6
-uvicorn[standard]==0.34.0
-python-multipart==0.0.20
+fastapi==0.111.1
+uvicorn[standard]==0.30.1
+python-multipart==0.0.9
 
 # --- Queue & Cache ---
-redis==5.2.1
-rq==2.1.0
+redis==5.0.8
+rq==1.16.2
 
 # --- Audio Processing ---
 # WhisperX currently requires faster-whisper>=1.2.0.
