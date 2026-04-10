@@ -10,7 +10,6 @@ rq==2.1.0
 # --- Audio Processing ---
 # WhisperX currently requires faster-whisper>=1.2.0.
 faster-whisper==1.2.0
-whisperx @ git+https://github.com/m-bain/whisperX.git
 silero-vad==5.1.2
 pydub==0.25.1
 soundfile==0.13.1
@@ -18,6 +17,10 @@ librosa==0.10.2.post1
 
 # --- Speaker Diarization ---
 pyannote.audio>=3.3.2
+
+# --- Additional WhisperX deps ---
+pandas
+nltk
 
 # --- Configuration ---
 pyyaml==6.0.2

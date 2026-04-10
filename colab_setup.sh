@@ -20,6 +20,9 @@ pip install "gradio>=4.44.1,<5.0.0" "huggingface_hub<0.26.0" "pydantic<3.0.0"
 # Install everything else
 pip install -r requirements.txt
 
+# Finish with compiling whisperx bypassing pip dependency checks
+pip install --no-deps git+https://github.com/m-bain/whisperX.git@v3.7.9
+
 # Create necessary directories
 mkdir -p uploads outputs temp models
 echo "Setup complete!"
