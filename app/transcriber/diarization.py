@@ -1,6 +1,15 @@
 """
 Speaker diarization using pyannote.audio.
 Assigns speaker labels to transcription segments.
+
+Compatibility notes
+-------------------
+* pyannote.audio 4.x — use ``token=`` (not the deprecated ``use_auth_token=``).
+* torch 2.6+ — changed torch.load default to weights_only=True, which breaks
+  pyannote checkpoint loading (OmegaConf objects not in safe allowlist).
+  We patch torch.load before importing pyannote so it defaults to False.
+* speechbrain (pulled in by pyannote) — torchaudio.list_audio_backends()
+  was removed in torchaudio 2.9+; see app/transcriber/diarization.py patch.
 """
 
 from __future__ import annotations
@@ -13,6 +22,32 @@ from loguru import logger
 from app.config import get_config
 
 _pipeline: Optional[Any] = None
+
+
+def _apply_torch_load_patch() -> None:
+    """
+    Patch torch.load to default weights_only=False.
+
+    torch 2.6+ changed the default to True for security, but pyannote.audio
+    checkpoints contain OmegaConf DictConfig / ListConfig objects that are not
+    in PyTorch's safe-globals allowlist, causing UnpicklingError at load time.
+
+    This is the same workaround used by strato-transcripts (Jan 2026) and is
+    safe because we only load trusted HuggingFace official models.
+    """
+    try:
+        from packaging.version import Version
+        if Version(torch.__version__.split("+")[0]) >= Version("2.6.0"):
+            _orig = torch.load
+
+            def _patched_load(*args, **kwargs):
+                kwargs.setdefault("weights_only", False)
+                return _orig(*args, **kwargs)
+
+            torch.load = _patched_load  # type: ignore[method-assign]
+            logger.debug("torch.load weights_only patch applied (torch>=2.6)")
+    except Exception as e:
+        logger.debug(f"torch.load patch skipped: {e}")
 
 
 def _load_pipeline():
@@ -31,6 +66,9 @@ def _load_pipeline():
         return None
 
     try:
+        # Apply torch.load compat patch BEFORE importing pyannote.
+        _apply_torch_load_patch()
+
         from pyannote.audio import Pipeline
 
         device = (
@@ -42,7 +80,7 @@ def _load_pipeline():
         logger.info("Loading pyannote diarization pipeline …")
         _pipeline = Pipeline.from_pretrained(
             "pyannote/speaker-diarization-3.1",
-            use_auth_token=cfg.diarization.hf_token,
+            token=cfg.diarization.hf_token,   # pyannote 4.x uses 'token', not 'use_auth_token'
         )
         _pipeline = _pipeline.to(device)
         logger.info("Diarization pipeline loaded")

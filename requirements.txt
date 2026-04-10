@@ -36,8 +36,10 @@ soundfile>=0.12.1
 librosa>=0.10.2
 
 # --- Speaker Diarization ---
-# pyannote.audio 4.x is required by whisperx v3.8.5
-pyannote.audio>=4.0.0
+# Pin to 4.0.1 — the last release with a flexible torch dependency (torch>=2.0).
+# 4.0.2+ hard-pins torch==2.8.0 exactly, breaking any environment running
+# torch 2.9+.  See: github.com/pyannote/pyannote-audio commit 121054b6
+pyannote.audio==4.0.1
 pyannote.core>=5.0.0
 pyannote.pipeline>=3.0.1
 
