@@ -31,10 +31,6 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
         if request.url.path in _PUBLIC_PATHS:
             return await call_next(request)
 
-        # Pass through CORS preflight requests so CORSMiddleware can handle them
-        if request.method == "OPTIONS":
-            return await call_next(request)
-
         api_key = request.headers.get("x-api-key")
         if not api_key or api_key not in cfg.security.api_keys:
             logger.warning(

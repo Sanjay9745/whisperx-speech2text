@@ -38,8 +38,14 @@ app = FastAPI(
     description="Production-grade speech transcription powered by faster-whisper",
 )
 
-# CORS — allow any origin so the HTML UI (served from a different tunnel URL)
-# can call this API directly from the browser.
+# NOTE: Starlette applies middleware in reverse registration order (last-added
+# runs outermost). APIKeyMiddleware must be added FIRST so that CORSMiddleware
+# (added last) wraps it and handles preflight OPTIONS before auth runs.
+
+# Security middleware (inner — runs after CORS)
+app.add_middleware(APIKeyMiddleware)
+
+# CORS — outermost layer; intercepts OPTIONS preflight before auth middleware.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -47,9 +53,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Security middleware
-app.add_middleware(APIKeyMiddleware)
 
 
 # ---------------------------------------------------------------------------
