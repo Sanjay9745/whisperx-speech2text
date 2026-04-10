@@ -1,0 +1,666 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Speech-to-Text API Tester</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      background: #0f1117;
+      color: #e2e8f0;
+      min-height: 100vh;
+      padding: 2rem 1rem;
+    }
+
+    h1 {
+      font-size: 1.6rem;
+      font-weight: 700;
+      color: #a78bfa;
+      margin-bottom: 0.25rem;
+    }
+    .subtitle { color: #64748b; font-size: 0.875rem; margin-bottom: 2rem; }
+
+    /* ── Card ── */
+    .card {
+      background: #1e2130;
+      border: 1px solid #2d3148;
+      border-radius: 12px;
+      padding: 1.5rem;
+      margin-bottom: 1.25rem;
+    }
+    .card-title {
+      font-size: 0.7rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: #7c85a2;
+      margin-bottom: 1rem;
+    }
+
+    /* ── Form controls ── */
+    label { display: block; font-size: 0.82rem; color: #94a3b8; margin-bottom: 0.3rem; }
+    input, textarea, select {
+      width: 100%;
+      background: #12141f;
+      border: 1px solid #2d3148;
+      border-radius: 7px;
+      color: #e2e8f0;
+      font-size: 0.875rem;
+      padding: 0.55rem 0.75rem;
+      outline: none;
+      transition: border-color .15s;
+      font-family: inherit;
+    }
+    input:focus, textarea:focus, select:focus { border-color: #7c3aed; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+    .row.tri { grid-template-columns: 2fr 1fr 1fr; }
+    @media (max-width: 680px) { .row, .row.tri { grid-template-columns: 1fr; } }
+    .field { margin-bottom: 0.85rem; }
+    .hint { font-size: 0.75rem; color: #475569; margin-top: 0.25rem; }
+
+    /* Toggle group */
+    .toggle-group { display: flex; gap: 0; border-radius: 7px; overflow: hidden; border: 1px solid #2d3148; }
+    .toggle-group button {
+      flex: 1; padding: 0.45rem; background: #12141f; color: #64748b;
+      border: none; cursor: pointer; font-size: 0.8rem; transition: background .15s, color .15s;
+    }
+    .toggle-group button.active { background: #7c3aed; color: #fff; }
+
+    /* ── Buttons ── */
+    .btn {
+      display: inline-flex; align-items: center; gap: 0.4rem;
+      padding: 0.6rem 1.25rem; border-radius: 8px; border: none;
+      font-size: 0.875rem; font-weight: 600; cursor: pointer; transition: opacity .15s;
+    }
+    .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+    .btn-primary { background: #7c3aed; color: #fff; }
+    .btn-primary:hover:not(:disabled) { background: #6d28d9; }
+    .btn-danger  { background: #dc2626; color: #fff; }
+    .btn-danger:hover:not(:disabled)  { background: #b91c1c; }
+    .btn-ghost   { background: #1e2130; border: 1px solid #2d3148; color: #94a3b8; }
+    .btn-ghost:hover { background: #252840; }
+
+    /* ── Progress ── */
+    .progress-wrap { background: #12141f; border-radius: 99px; height: 8px; overflow: hidden; }
+    .progress-bar  {
+      height: 100%; border-radius: 99px;
+      background: linear-gradient(90deg, #7c3aed, #a78bfa);
+      transition: width .4s ease;
+    }
+    .status-badge {
+      display: inline-block; padding: 0.2rem 0.6rem; border-radius: 99px;
+      font-size: 0.72rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em;
+    }
+    .badge-queued     { background: #1e40af30; color: #60a5fa; border: 1px solid #1d4ed8; }
+    .badge-processing { background: #78350030; color: #fbbf24; border: 1px solid #b45309; }
+    .badge-completed  { background: #16503030; color: #34d399; border: 1px solid #059669; }
+    .badge-failed     { background: #7f1d1d30; color: #f87171; border: 1px solid #dc2626; }
+
+    /* ── Result panes ── */
+    .result-text {
+      background: #12141f; border: 1px solid #2d3148; border-radius: 8px;
+      padding: 1rem; white-space: pre-wrap; font-size: 0.9rem;
+      line-height: 1.7; min-height: 60px; max-height: 280px; overflow-y: auto;
+    }
+    .segments-table { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
+    .segments-table th {
+      text-align: left; padding: 0.4rem 0.6rem;
+      background: #12141f; color: #7c85a2;
+      border-bottom: 1px solid #2d3148;
+    }
+    .segments-table td { padding: 0.4rem 0.6rem; border-bottom: 1px solid #1e2130; }
+    .segments-table tr:hover td { background: #252840; }
+    .ts { color: #64748b; font-variant-numeric: tabular-nums; font-size: 0.75rem; }
+    .speaker-chip {
+      display: inline-block; padding: 0.1rem 0.4rem; border-radius: 4px;
+      background: #4c1d9520; border: 1px solid #6d28d9; color: #a78bfa;
+      font-size: 0.7rem;
+    }
+
+    /* ── Log ── */
+    .log-box {
+      background: #0a0b11; border: 1px solid #1e2130; border-radius: 8px;
+      padding: 0.75rem 1rem; font-family: 'Cascadia Code', 'Fira Code', monospace;
+      font-size: 0.75rem; line-height: 1.6; max-height: 200px; overflow-y: auto;
+      color: #64748b;
+    }
+    .log-box .log-info  { color: #60a5fa; }
+    .log-box .log-ok    { color: #34d399; }
+    .log-box .log-warn  { color: #fbbf24; }
+    .log-box .log-error { color: #f87171; }
+
+    /* ── Webhook payloads ── */
+    .webhook-entry {
+      background: #12141f; border: 1px solid #1e293b; border-radius: 8px;
+      padding: 0.75rem 1rem; margin-bottom: 0.5rem;
+    }
+    .webhook-entry summary { cursor: pointer; font-size: 0.82rem; color: #94a3b8; }
+    .webhook-entry pre {
+      margin-top: 0.5rem; font-size: 0.72rem; color: #7c85a2;
+      overflow-x: auto; white-space: pre-wrap;
+    }
+
+    /* Misc */
+    .flex-between { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 0.5rem; }
+    .gap-2 { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+    .hidden { display: none !important; }
+    .divider { border: none; border-top: 1px solid #2d3148; margin: 1rem 0; }
+    #copy-toast {
+      position: fixed; bottom: 1.5rem; right: 1.5rem;
+      background: #059669; color: #fff; padding: 0.5rem 1rem;
+      border-radius: 8px; font-size: 0.8rem; opacity: 0; transition: opacity .3s;
+      pointer-events: none;
+    }
+    #copy-toast.show { opacity: 1; }
+  </style>
+</head>
+<body>
+
+<div style="max-width:900px;margin:0 auto">
+
+  <h1>🎙️ Speech-to-Text API Tester</h1>
+  <p class="subtitle">Submit transcription jobs, poll status, and inspect results — all in the browser.</p>
+
+  <!-- ── Connection ── -->
+  <div class="card">
+    <div class="card-title">🔌 Connection</div>
+    <div class="row tri">
+      <div class="field">
+        <label>API Base URL</label>
+        <input id="apiUrl" type="url" value="http://localhost:8000"
+               placeholder="https://xxxx.trycloudflare.com" />
+        <div class="hint">Local or Cloudflare public URL — no trailing slash</div>
+      </div>
+      <div class="field">
+        <label>API Key  <span style="color:#7c3aed">(x-api-key)</span></label>
+        <input id="apiKey" type="text" value="colab-test-key" />
+      </div>
+      <div class="field" style="display:flex;flex-direction:column;justify-content:flex-end">
+        <button class="btn btn-ghost" onclick="testConnection()">🔍 Test connection</button>
+      </div>
+    </div>
+    <div id="conn-status" class="hint"></div>
+  </div>
+
+  <!-- ── Submit job ── -->
+  <div class="card">
+    <div class="card-title">📤 Submit Job</div>
+
+    <div class="field">
+      <label>Audio source</label>
+      <div class="toggle-group" id="src-toggle">
+        <button class="active" onclick="setSrc('url')">🔗 URL</button>
+        <button onclick="setSrc('file')">📁 File upload</button>
+      </div>
+    </div>
+
+    <div class="field" id="src-url-wrap">
+      <label>Audio URL</label>
+      <input id="audioUrl" type="url"
+             value="https://www.voiptroubleshooter.com/open_speech/american/OSR_us_000_0010_8k.wav"
+             placeholder="https://…/audio.mp3" />
+      <div class="hint">Any publicly reachable mp3 / wav / m4a / ogg URL</div>
+    </div>
+
+    <div class="field hidden" id="src-file-wrap">
+      <label>Audio file</label>
+      <input id="audioFile" type="file" accept="audio/*,video/*" />
+    </div>
+
+    <div class="row">
+      <div class="field">
+        <label>Webhook URL  <span style="color:#64748b">(optional)</span></label>
+        <input id="webhookUrl" type="url" placeholder="https://…/webhook" />
+        <div class="hint">Leave blank to skip webhook delivery</div>
+      </div>
+      <div class="field">
+        <label>Metadata JSON  <span style="color:#64748b">(optional)</span></label>
+        <input id="metaJson" type="text" value='{"client":"html-tester"}' />
+      </div>
+    </div>
+
+    <div class="gap-2" style="margin-top:0.5rem">
+      <button id="btn-submit" class="btn btn-primary" onclick="submitJob()">▶ Submit job</button>
+      <button id="btn-cancel" class="btn btn-danger hidden" onclick="cancelPoll()">⏹ Cancel poll</button>
+    </div>
+  </div>
+
+  <!-- ── Status / progress ── -->
+  <div class="card" id="status-card" style="display:none">
+    <div class="flex-between" style="margin-bottom:0.75rem">
+      <div class="card-title" style="margin:0">⚙️ Job Status</div>
+      <div id="status-badge"></div>
+    </div>
+
+    <div class="field">
+      <div class="flex-between" style="margin-bottom:0.35rem">
+        <label style="margin:0">Progress</label>
+        <span id="progress-pct" style="font-size:0.8rem;color:#7c85a2">0%</span>
+      </div>
+      <div class="progress-wrap"><div id="progress-bar" class="progress-bar" style="width:0%"></div></div>
+    </div>
+
+    <div class="field">
+      <label>Job ID</label>
+      <div style="display:flex;gap:0.5rem;align-items:center">
+        <input id="job-id-display" type="text" readonly style="color:#64748b;cursor:default" />
+        <button class="btn btn-ghost" style="white-space:nowrap" onclick="copyJobId()">📋 Copy</button>
+      </div>
+    </div>
+
+    <!-- Manual job lookup -->
+    <hr class="divider"/>
+    <label>Or look up an existing job ID</label>
+    <div style="display:flex;gap:0.5rem;margin-top:0.3rem">
+      <input id="lookup-id" type="text" placeholder="xxxxxxxx-xxxx-…" />
+      <button class="btn btn-ghost" onclick="lookupJob()">🔎 Look up</button>
+    </div>
+  </div>
+
+  <!-- ── Activity log ── -->
+  <div class="card">
+    <div class="flex-between" style="margin-bottom:0.5rem">
+      <div class="card-title" style="margin:0">📋 Activity Log</div>
+      <button class="btn btn-ghost" style="padding:0.25rem 0.6rem;font-size:0.75rem" onclick="clearLog()">Clear</button>
+    </div>
+    <div id="log-box" class="log-box">Ready — fill in the form above and click Submit.</div>
+  </div>
+
+  <!-- ── Result ── -->
+  <div class="card hidden" id="result-card">
+    <div class="flex-between" style="margin-bottom:1rem">
+      <div class="card-title" style="margin:0">✅ Transcription Result</div>
+      <div class="gap-2">
+        <button class="btn btn-ghost" style="font-size:0.75rem" onclick="copyResult()">📋 Copy text</button>
+        <button class="btn btn-ghost" style="font-size:0.75rem" onclick="downloadResult()">💾 Download JSON</button>
+      </div>
+    </div>
+
+    <div class="row" id="result-meta" style="margin-bottom:1rem;font-size:0.82rem;color:#94a3b8"></div>
+
+    <div class="field">
+      <label>Full transcript</label>
+      <div id="result-text" class="result-text">(empty)</div>
+    </div>
+
+    <div class="field" id="segments-wrap">
+      <label>Segments</label>
+      <div style="overflow-x:auto;max-height:280px;overflow-y:auto;border:1px solid #2d3148;border-radius:8px">
+        <table class="segments-table">
+          <thead><tr><th>#</th><th>Start</th><th>End</th><th>Speaker</th><th>Text</th></tr></thead>
+          <tbody id="segments-body"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <details style="margin-top:0.5rem">
+      <summary style="cursor:pointer;color:#64748b;font-size:0.8rem">Raw JSON response</summary>
+      <pre id="result-raw" style="font-size:0.72rem;color:#475569;margin-top:0.5rem;overflow-x:auto;white-space:pre-wrap"></pre>
+    </details>
+  </div>
+
+  <!-- ── Received webhooks ── -->
+  <div class="card hidden" id="webhook-card">
+    <div class="flex-between" style="margin-bottom:0.5rem">
+      <div class="card-title" style="margin:0">📩 Webhooks Received</div>
+      <button class="btn btn-ghost" style="font-size:0.75rem" onclick="clearWebhooks()">Clear</button>
+    </div>
+    <div id="webhook-list"></div>
+  </div>
+
+</div><!-- /max-width wrapper -->
+
+<div id="copy-toast">Copied!</div>
+
+<script>
+// ============================================================================
+// State
+// ============================================================================
+let _pollTimer  = null;
+let _resultData = null;
+let _jobId      = null;
+let _webhooks   = [];
+
+// ============================================================================
+// Persist / restore settings
+// ============================================================================
+const SAVE_KEYS = ['apiUrl', 'apiKey', 'audioUrl', 'webhookUrl', 'metaJson'];
+window.addEventListener('DOMContentLoaded', () => {
+  SAVE_KEYS.forEach(k => {
+    const v = localStorage.getItem('s2t_' + k);
+    if (v !== null) document.getElementById(k).value = v;
+  });
+  SAVE_KEYS.forEach(k => {
+    document.getElementById(k).addEventListener('input', () => {
+      localStorage.setItem('s2t_' + k, document.getElementById(k).value);
+    });
+  });
+});
+
+// ============================================================================
+// Helpers
+// ============================================================================
+function cfg() {
+  return {
+    apiUrl : document.getElementById('apiUrl').value.replace(/\/$/, ''),
+    apiKey : document.getElementById('apiKey').value.trim(),
+  };
+}
+
+function fmt(sec) {
+  if (sec == null) return '—';
+  const m = Math.floor(sec / 60), s = (sec % 60).toFixed(2).padStart(5, '0');
+  return m > 0 ? `${m}:${s}` : `${parseFloat(sec).toFixed(2)}s`;
+}
+
+function toast(msg) {
+  const el = document.getElementById('copy-toast');
+  el.textContent = msg;
+  el.classList.add('show');
+  setTimeout(() => el.classList.remove('show'), 1800);
+}
+
+// ── Log ──────────────────────────────────────────────────────────────────────
+function log(msg, type = 'info') {
+  const box  = document.getElementById('log-box');
+  const time = new Date().toLocaleTimeString();
+  const line = document.createElement('div');
+  line.className = `log-${type}`;
+  line.textContent = `[${time}]  ${msg}`;
+  box.appendChild(line);
+  box.scrollTop = box.scrollHeight;
+}
+function clearLog() { document.getElementById('log-box').innerHTML = ''; }
+
+// ── Source toggle ─────────────────────────────────────────────────────────────
+function setSrc(mode) {
+  document.querySelectorAll('#src-toggle button').forEach((b, i) => {
+    b.classList.toggle('active', (i === 0 && mode === 'url') || (i === 1 && mode === 'file'));
+  });
+  document.getElementById('src-url-wrap').classList.toggle('hidden', mode !== 'url');
+  document.getElementById('src-file-wrap').classList.toggle('hidden', mode !== 'file');
+}
+
+// ============================================================================
+// Connection test
+// ============================================================================
+async function testConnection() {
+  const { apiUrl, apiKey } = cfg();
+  const el = document.getElementById('conn-status');
+  el.textContent = 'Testing…';
+  log(`Testing connection to ${apiUrl}/health`, 'info');
+  try {
+    const r = await fetch(`${apiUrl}/health`, {
+      headers: { 'x-api-key': apiKey }
+    });
+    const d = await r.json();
+    el.style.color = '#34d399';
+    el.textContent = `✅  Connected  —  status: ${d.status ?? 'ok'}  (HTTP ${r.status})`;
+    log(`Connection OK — ${JSON.stringify(d)}`, 'ok');
+  } catch (e) {
+    el.style.color = '#f87171';
+    el.textContent = `❌  Failed: ${e.message}`;
+    log(`Connection failed: ${e.message}`, 'error');
+  }
+}
+
+// ============================================================================
+// Submit job
+// ============================================================================
+async function submitJob() {
+  const { apiUrl, apiKey } = cfg();
+
+  // Cancel any existing poll
+  cancelPoll();
+
+  const form = new FormData();
+
+  const fileInput = document.getElementById('audioFile');
+  const urlInput  = document.getElementById('audioUrl');
+  const isFile    = !document.getElementById('src-url-wrap').classList.contains('hidden') === false;
+
+  if (isFile && fileInput.files.length > 0) {
+    form.append('file', fileInput.files[0]);
+    log(`Audio source: FILE — ${fileInput.files[0].name}`, 'info');
+  } else if (urlInput.value.trim()) {
+    form.append('audio_url', urlInput.value.trim());
+    log(`Audio source: URL — ${urlInput.value.trim()}`, 'info');
+  } else {
+    log('No audio source selected.', 'error');
+    return;
+  }
+
+  const wh = document.getElementById('webhookUrl').value.trim();
+  if (wh) { form.append('webhook_url', wh); log(`Webhook: ${wh}`, 'info'); }
+
+  const meta = document.getElementById('metaJson').value.trim();
+  if (meta) {
+    try { JSON.parse(meta); form.append('metadata', meta); }
+    catch { log('Metadata JSON is invalid — skipping', 'warn'); }
+  }
+
+  document.getElementById('btn-submit').disabled = true;
+  log(`POST ${apiUrl}/transcribe …`, 'info');
+
+  try {
+    const r = await fetch(`${apiUrl}/transcribe`, {
+      method : 'POST',
+      headers: { 'x-api-key': apiKey },
+      body   : form,
+    });
+    if (!r.ok) {
+      const txt = await r.text();
+      throw new Error(`HTTP ${r.status}: ${txt}`);
+    }
+    const d = await r.json();
+    _jobId = d.job_id;
+    log(`Job submitted — id: ${_jobId}  status: ${d.status}`, 'ok');
+
+    // Show status card
+    document.getElementById('status-card').style.display = '';
+    document.getElementById('job-id-display').value = _jobId;
+    setStatus('queued', 0);
+    document.getElementById('result-card').classList.add('hidden');
+    document.getElementById('btn-cancel').classList.remove('hidden');
+    document.getElementById('btn-submit').disabled = false;
+
+    startPoll(_jobId);
+  } catch (e) {
+    log(`Submit failed: ${e.message}`, 'error');
+    document.getElementById('btn-submit').disabled = false;
+  }
+}
+
+// ============================================================================
+// Polling
+// ============================================================================
+function startPoll(jobId) {
+  _pollTimer = setInterval(() => pollOnce(jobId), 3000);
+  pollOnce(jobId);
+}
+
+async function pollOnce(jobId) {
+  const { apiUrl, apiKey } = cfg();
+  try {
+    const r = await fetch(`${apiUrl}/status/${jobId}`, {
+      headers: { 'x-api-key': apiKey }
+    });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const d = await r.json();
+    setStatus(d.status, d.progress ?? 0);
+
+    if (d.status === 'completed') {
+      cancelPoll();
+      log('Job completed ✅ — fetching result…', 'ok');
+      fetchResult(jobId);
+    } else if (d.status === 'failed') {
+      cancelPoll();
+      log(`Job failed ❌ — ${d.error ?? '(no detail)'}`, 'error');
+    }
+  } catch (e) {
+    log(`Poll error: ${e.message}`, 'warn');
+  }
+}
+
+function cancelPoll() {
+  if (_pollTimer) { clearInterval(_pollTimer); _pollTimer = null; }
+  document.getElementById('btn-cancel').classList.add('hidden');
+  document.getElementById('btn-submit').disabled = false;
+}
+
+// ============================================================================
+// Status badge + progress
+// ============================================================================
+function setStatus(status, pct) {
+  document.getElementById('progress-bar').style.width = `${pct}%`;
+  document.getElementById('progress-pct').textContent = `${pct}%`;
+  const badge = document.getElementById('status-badge');
+  badge.innerHTML = `<span class="status-badge badge-${status}">${status}</span>`;
+  log(`status=${status}  progress=${pct}%`);
+}
+
+// ============================================================================
+// Fetch result
+// ============================================================================
+async function fetchResult(jobId) {
+  const { apiUrl, apiKey } = cfg();
+  try {
+    const r = await fetch(`${apiUrl}/result/${jobId}`, {
+      headers: { 'x-api-key': apiKey }
+    });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const d = await r.json();
+    _resultData = d.result ?? d;
+    renderResult(_resultData, jobId);
+  } catch (e) {
+    log(`Result fetch error: ${e.message}`, 'error');
+  }
+}
+
+// ============================================================================
+// Render result
+// ============================================================================
+function renderResult(result, jobId) {
+  document.getElementById('result-card').classList.remove('hidden');
+
+  // Meta row
+  document.getElementById('result-meta').innerHTML = `
+    <div><b style="color:#a78bfa">${result.language ?? '?'}</b> <span style="color:#475569">language</span></div>
+    <div><b style="color:#a78bfa">${(result.segments ?? []).length}</b> <span style="color:#475569">segments</span></div>
+    <div><b style="color:#a78bfa">${(result.words ?? []).length}</b> <span style="color:#475569">words</span></div>
+    <div><b style="color:#a78bfa">${(result.speakers ?? []).length || '—'}</b> <span style="color:#475569">speaker turns</span></div>
+  `;
+
+  // Text
+  document.getElementById('result-text').textContent = result.text?.trim() || '(no text)';
+
+  // Segments table
+  const tbody = document.getElementById('segments-body');
+  tbody.innerHTML = '';
+  (result.segments ?? []).forEach((seg, i) => {
+    const spk = seg.speaker
+      ? `<span class="speaker-chip">${seg.speaker}</span>` : '—';
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td class="ts">${i + 1}</td>
+      <td class="ts">${fmt(seg.start)}</td>
+      <td class="ts">${fmt(seg.end)}</td>
+      <td>${spk}</td>
+      <td>${seg.text ?? ''}</td>
+    `;
+    tbody.appendChild(tr);
+  });
+  if ((result.segments ?? []).length === 0) {
+    tbody.innerHTML = '<tr><td colspan="5" style="color:#475569;text-align:center;padding:1rem">No segments</td></tr>';
+  }
+
+  // Raw JSON
+  document.getElementById('result-raw').textContent = JSON.stringify(result, null, 2);
+
+  log(`Result rendered — ${(result.segments ?? []).length} segments, ${(result.words ?? []).length} words`, 'ok');
+}
+
+// ============================================================================
+// Manual lookup
+// ============================================================================
+async function lookupJob() {
+  const id = document.getElementById('lookup-id').value.trim();
+  if (!id) return;
+  _jobId = id;
+  document.getElementById('status-card').style.display = '';
+  document.getElementById('job-id-display').value = id;
+  cancelPoll();
+  log(`Looking up job ${id}…`, 'info');
+
+  const { apiUrl, apiKey } = cfg();
+  try {
+    const r = await fetch(`${apiUrl}/status/${id}`, { headers: { 'x-api-key': apiKey } });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const d = await r.json();
+    setStatus(d.status, d.progress ?? 0);
+    if (d.status === 'completed') fetchResult(id);
+    else if (d.status === 'queued' || d.status === 'processing') startPoll(id);
+  } catch (e) {
+    log(`Lookup failed: ${e.message}`, 'error');
+  }
+}
+
+// ============================================================================
+// Clipboard / download
+// ============================================================================
+function copyJobId() {
+  navigator.clipboard.writeText(document.getElementById('job-id-display').value);
+  toast('Job ID copied!');
+}
+
+function copyResult() {
+  if (!_resultData) return;
+  navigator.clipboard.writeText(_resultData.text ?? '');
+  toast('Transcript copied!');
+}
+
+function downloadResult() {
+  if (!_resultData) return;
+  const blob = new Blob([JSON.stringify(_resultData, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `${_jobId ?? 'result'}.json`;
+  a.click();
+}
+
+// ============================================================================
+// Webhook display (if webhook_server.js /webhooks endpoint is accessible)
+// ============================================================================
+function clearWebhooks() {
+  _webhooks = [];
+  document.getElementById('webhook-list').innerHTML = '';
+  document.getElementById('webhook-card').classList.add('hidden');
+}
+
+// Expose a helper so the page can receive webhook payloads posted to it
+// via the webhook_server.js /webhooks polling (optional, manual use)
+window.addWebhookPayload = function(payload) {
+  _webhooks.push(payload);
+  const card = document.getElementById('webhook-card');
+  card.classList.remove('hidden');
+  const list = document.getElementById('webhook-list');
+  const entry = document.createElement('details');
+  entry.className = 'webhook-entry';
+  entry.open = _webhooks.length === 1;
+  entry.innerHTML = `
+    <summary>
+      #${_webhooks.length}
+      &nbsp;·&nbsp; job_id: <b>${payload?.job_id ?? '?'}</b>
+      &nbsp;·&nbsp; status: <b>${payload?.status ?? '?'}</b>
+      &nbsp;·&nbsp; <span style="color:#475569">${new Date().toLocaleTimeString()}</span>
+    </summary>
+    <pre>${JSON.stringify(payload, null, 2)}</pre>
+  `;
+  list.prepend(entry);
+};
+</script>
+</body>
+</html>

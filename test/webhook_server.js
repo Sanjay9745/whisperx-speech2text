@@ -1,36 +1,55 @@
 /**
- * webhook_server.js — Local webhook receiver for testing
+ * webhook_server.js — Webhook receiver + interactive HTML UI
  *
- * Starts a tiny Express server that listens for POST requests from the
- * Speech-to-Text API and pretty-prints every payload it receives.
+ * Starts an Express server that:
+ *   1. Receives POST /webhook payloads from the Speech-to-Text API
+ *   2. Serves an interactive HTML UI at / and /ui
+ *   3. Optionally exposes itself via localtunnel (free public HTTPS URL)
  *
- * Usage:
- *   node webhook_server.js
+ * ── Quick start ─────────────────────────────────────────────────────────────
+ *   node webhook_server.js                      # Run locally on :4000
+ *   node webhook_server.js --tunnel             # + localtunnel for public URL
+ *   PORT=5000 node webhook_server.js --tunnel   # Custom port + tunnel
  *
- * Then pass the URL shown in the console as the webhook_url when you
- * call /transcribe, or set it in test_api.js:
- *   WEBHOOK_URL=http://localhost:4000/webhook node test_api.js
+ * ── Usage ────────────────────────────────────────────────────────────────────
+ *   Local:     http://localhost:4000/
+ *   Webhook:   http://localhost:4000/webhook
  *
- * On Colab you need a tunnel (e.g. ngrok) to expose this port:
- *   !npm install -g localtunnel
- *   !lt --port 4000
- *   # Use the printed URL as your WEBHOOK_URL
+ *   Public (with --tunnel):
+ *   UI:        https://xxxx.localtunneltunnel.net/
+ *   Webhook:   https://xxxx.localtunneltunnel.net/webhook
  *
- * Env vars:
- *   PORT     Port to listen on (default: 4000)
- *   SECRET   If set, reject requests that don't include x-webhook-secret header
+ * ── Env vars ────────────────────────────────────────────────────────────────
+ *   PORT           Port to listen on           (default: 4000)
+ *   SECRET         x-webhook-secret validation (optional)
+ *   --tunnel       Open localtunnel public URL (requires installed localtunnel)
  */
 
 import express from 'express';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import localtunnel from 'localtunnel';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const PORT   = parseInt(process.env.PORT   || '4000', 10);
 const SECRET = process.env.SECRET || null;
+const TUNNEL = process.argv.includes('--tunnel');
 
 const app = express();
 app.use(express.json({ limit: '50mb' }));
+app.use(express.static(path.join(__dirname, '.')));  // Serve static files (index.html, etc.)
 
 // ---------------------------------------------------------------------------
-// Track received webhooks in memory (for manual inspection in the console)
+// GET /  or /ui — serve the interactive HTML tester
+// ---------------------------------------------------------------------------
+app.get('/', (req, res) => {
+  res.sendFile(path.join(__dirname, 'index.html'));
+});
+app.get('/ui', (req, res) => {
+  res.sendFile(path.join(__dirname, 'index.html'));
+});
+
 // ---------------------------------------------------------------------------
 const receivedWebhooks = [];
 
@@ -90,15 +109,37 @@ app.get('/health', (_req, res) => res.json({ status: 'ok' }));
 // ---------------------------------------------------------------------------
 // Start
 // ---------------------------------------------------------------------------
-app.listen(PORT, () => {
+const server = app.listen(PORT, async () => {
   console.log('============================================================');
-  console.log(' Webhook Receiver Server');
+  console.log(' Webhook Receiver + Test UI Server');
   console.log(`  listening on  : http://localhost:${PORT}`);
+  console.log(`  UI            : http://localhost:${PORT}/`);
   console.log(`  webhook URL   : http://localhost:${PORT}/webhook`);
   console.log(`  view received : http://localhost:${PORT}/webhooks`);
   if (SECRET) console.log(`  secret        : set (header x-webhook-secret)`);
   console.log('');
-  console.log('  Set WEBHOOK_URL in your test environment:');
-  console.log(`    WEBHOOK_URL=http://localhost:${PORT}/webhook node test_api.js`);
-  console.log('============================================================\n');
+
+  // ── Open localtunnel if --tunnel flag ───────────────────────────────────
+  if (TUNNEL) {
+    try {
+      console.log(' Opening localtunnel (public HTTPS URL) …');
+      const tunnel = await localtunnel({ port: PORT });
+      console.log(`  Public URL    : ${tunnel.url}`);
+      console.log(`  Public UI     : ${tunnel.url}/`);
+      console.log(`  Public webhook: ${tunnel.url}/webhook`);
+      console.log('');
+      console.log('  Use this webhook URL in your API calls:');
+      console.log(`    webhook_url: ${tunnel.url}/webhook`);
+      console.log('============================================================\n');
+      tunnel.on('error', e => console.error('Tunnel error:', e.message));
+      tunnel.on('close', () => console.log('\nTunnel closed.'));
+    } catch (e) {
+      console.error(`  ❌ localtunnel failed: ${e.message}`);
+      console.log('  Install it with: npm install localtunnel');
+      console.error('============================================================\n');
+    }
+  } else {
+    console.log('  (use --tunnel flag to expose via localtunnel)\n');
+    console.log('============================================================\n');
+  }
 });

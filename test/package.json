@@ -4,9 +4,10 @@
   "description": "Test client and webhook receiver for the Speech-to-Text API",
   "type": "module",
   "scripts": {
-    "test"           : "node test_api.js",
-    "webhook-server" : "node webhook_server.js",
-    "test:with-webhook": "node webhook_server.js & sleep 1 && node test_api.js"
+    "test"             : "node test_api.js",
+    "webhook-server"   : "node webhook_server.js",
+    "test:with-webhook": "node webhook_server.js & sleep 1 && node test_api.js",
+    "ui"               : "npx serve . -p 3000 --no-clipboard"
   },
   "dependencies": {
     "axios"    : "^1.7.7",
