@@ -62,13 +62,20 @@ class VoiceActivityDetector:
             min_speech_duration_ms=min_speech_duration_ms,
             min_silence_duration_ms=min_silence_duration_ms,
         )
-        segments = [
-            {
-                "start": ts["start"] / sampling_rate,
-                "end": ts["end"] / sampling_rate,
-            }
-            for ts in timestamps
-        ]
+        # silero-vad <5.x returns {start: int_samples, end: int_samples}.
+        # silero-vad >=5.x returns {start: float_seconds, end: float_seconds}.
+        # Detect which format we have: if values look like sample counts
+        # (integers >> 1) divide by sampling_rate; otherwise use as-is.
+        segments = []
+        for ts in timestamps:
+            s, e = ts["start"], ts["end"]
+            # Sample counts are always > 1 for any reasonable audio;
+            # second-based values for speech are always < ~3600.
+            if isinstance(s, (int, float)) and s > sampling_rate:
+                # Old API — values are sample indices
+                s = s / sampling_rate
+                e = e / sampling_rate
+            segments.append({"start": float(s), "end": float(e)})
         logger.info(f"VAD found {len(segments)} speech segments in {audio_path}")
         return segments
 

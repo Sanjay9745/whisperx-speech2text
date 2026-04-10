@@ -95,9 +95,10 @@ def transcribe_chunk(
         best_of=cfg.accuracy.best_of,
         temperature=cfg.accuracy.temperature,
         language=language,
-        # batch_size controls how many chunks are fed to the CTranslate2 engine
-        # at once; this is different from the audio-level chunking we do above.
-        batch_size=cfg.performance.batch_size,
+        # NOTE: do NOT pass batch_size here.
+        # faster-whisper's batch_size is only for its built-in VAD pipeline;
+        # passing it with vad_filter=False + word_timestamps=True causes the
+        # model to return empty segments on short audio chunks.
         vad_filter=False,       # VAD is handled externally (chunker.py)
         word_timestamps=True,
     )
