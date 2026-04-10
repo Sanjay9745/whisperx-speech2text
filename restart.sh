@@ -4,6 +4,7 @@ echo "Pulling latest code from GitHub..."
 git pull
 
 echo "Restarting services..."
+pip install -r requirements.txt
 
 # Kill existing processes
 pkill -f "uvicorn app.main:app"
