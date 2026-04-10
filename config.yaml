@@ -63,12 +63,13 @@ accuracy:
   best_of: 5
 
 # ---------------------------------------------------------------------------
-# Speaker diarization (pyannote.audio)
+# Speaker diarization (pyannote.audio >= 4.x)
 # Env overrides: WHISPER_DIARIZATION_ENABLED | WHISPER_HF_TOKEN
 #
 # !! IMPORTANT: You MUST set WHISPER_HF_TOKEN (or fill hf_token below)
 #    with a Hugging Face token that has accepted the pyannote model terms:
 #    https://huggingface.co/pyannote/speaker-diarization-3.1
+#    https://huggingface.co/pyannote/segmentation-3.0
 # ---------------------------------------------------------------------------
 diarization:
   enabled: true

@@ -7,12 +7,17 @@
 #   %cd /content/speech2text
 #   !bash colab_setup.sh
 #
-# The script assumes:
-#   • A GPU runtime is selected (Runtime → Change runtime type → T4 GPU)
-#   • CUDA 12.x is already present in the Colab image (CUDA 12.1 as of 2024)
+# Strategy:
+#   • Do NOT reinstall or downgrade torch / numpy — Colab already ships
+#     torch 2.10+cu128 and numpy 2.x, which satisfy all our dependencies.
+#   • Install only the packages Colab is missing.
+#   • Install whisperx v3.8.5 with --no-deps to avoid pip touching torch.
+#
+# Prerequisites:
+#   • GPU runtime selected (Runtime → Change runtime type → T4 GPU)
 # =============================================================================
 
-set -euo pipefail
+set -uo pipefail   # note: no -e so pip warnings don't abort the script
 
 echo "============================================================"
 echo " Speech-to-Text API — Google Colab Setup"
@@ -21,79 +26,118 @@ echo "============================================================"
 # ---------------------------------------------------------------------------
 # 1. System dependencies
 # ---------------------------------------------------------------------------
-echo "[1/7] Installing system packages …"
+echo "[1/5] Installing system packages …"
 apt-get update -qq
-apt-get install -y -qq ffmpeg redis-server
+apt-get install -y -qq ffmpeg libsndfile1 redis-server
 
 # ---------------------------------------------------------------------------
 # 2. Start Redis (background)
 # ---------------------------------------------------------------------------
-echo "[2/7] Starting Redis …"
+echo "[2/5] Starting Redis …"
 redis-server --daemonize yes --loglevel warning
 sleep 1
-redis-cli ping && echo "Redis is up" || { echo "ERROR: Redis failed to start"; exit 1; }
+if redis-cli ping | grep -q PONG; then
+    echo "      Redis is up ✅"
+else
+    echo "      ERROR: Redis failed to start ❌"
+    exit 1
+fi
 
 # ---------------------------------------------------------------------------
-# 3. Upgrade pip / setuptools
+# 3. Upgrade pip / build tools
 # ---------------------------------------------------------------------------
-echo "[3/7] Upgrading pip / build tools …"
+echo "[3/5] Upgrading pip / build tools …"
 pip install --quiet --upgrade pip setuptools wheel
 
 # ---------------------------------------------------------------------------
-# 4. Install PyTorch with the CUDA 12.1 wheel
-#    Colab ships CUDA 12.x; cu121 wheels work on both 12.1 and 12.4.
-#    We pin torch==2.5.1 to match requirements.txt.
+# 4. Install Python dependencies
+#    torch, torchaudio, numpy are already installed by Colab — pip skips them.
+#    We override only the packages whose Colab versions are too old for us.
 # ---------------------------------------------------------------------------
-echo "[4/7] Installing PyTorch 2.5.1 + CUDA 12.1 wheels …"
-pip install --quiet \
-    torch==2.5.1 \
-    torchaudio==2.5.1 \
-    --index-url https://download.pytorch.org/whl/cu121
+echo "[4/5] Installing Python dependencies …"
 
-# Verify GPU access
+# WhisperX v3.8.5 runtime deps first (without whisperx itself)
+pip install --quiet \
+    "ctranslate2>=4.5.0" \
+    "faster-whisper>=1.2.0" \
+    "pyannote.audio>=4.0.0" \
+    "pyannote.core>=5.0.0" \
+    "pyannote.pipeline>=3.0.1" \
+    "omegaconf>=2.3.0"
+
+# App dependencies (ranges let Colab's other packages coexist)
+pip install --quiet \
+    "fastapi>=0.124.1,<2.0.0" \
+    "uvicorn[standard]>=0.34.0,<2.0.0" \
+    "starlette>=0.49.1,<2.0.0" \
+    "python-multipart>=0.0.18" \
+    "redis>=5.2.0,<6.0.0" \
+    "rq>=2.0.0,<3.0.0" \
+    "pydub>=0.25.1" \
+    "soundfile>=0.12.1" \
+    "librosa>=0.10.2" \
+    "silero-vad>=5.1.2" \
+    "pandas>=2.2.3" \
+    "nltk>=3.9.1" \
+    "huggingface-hub>=0.33.5,<1.0.0" \
+    "transformers>=4.48.0" \
+    "httpx>=0.28.1" \
+    "aiofiles>=24.1.0" \
+    "pyyaml>=6.0.2" \
+    "loguru>=0.7.3"
+
+# ---------------------------------------------------------------------------
+# 5. Install WhisperX v3.8.5 with --no-deps (keeps Colab torch intact)
+# ---------------------------------------------------------------------------
+echo "[5/5] Installing WhisperX v3.8.5 (--no-deps) …"
+pip install --quiet --no-deps \
+    "git+https://github.com/m-bain/whisperX.git@v3.8.5"
+
+# ---------------------------------------------------------------------------
+# Verify
+# ---------------------------------------------------------------------------
 python - <<'PYEOF'
+import sys
+ok = True
+checks = {
+    "torch"         : lambda: __import__("torch").__version__,
+    "numpy"         : lambda: __import__("numpy").__version__,
+    "faster_whisper": lambda: __import__("faster_whisper").__version__,
+    "whisperx"      : lambda: __import__("whisperx").__version__,
+    "fastapi"       : lambda: __import__("fastapi").__version__,
+    "pyannote.audio": lambda: __import__("pyannote.audio").__version__,
+}
+for pkg, fn in checks.items():
+    try:
+        ver = fn()
+        print(f"  ✅  {pkg:<20} {ver}")
+    except Exception as e:
+        print(f"  ❌  {pkg:<20} FAILED: {e}")
+        ok = False
+
 import torch
-assert torch.cuda.is_available(), "CUDA not available — did you select a GPU runtime?"
-print(f"  torch {torch.__version__}  |  CUDA {torch.version.cuda}  |  GPU: {torch.cuda.get_device_name(0)}")
+cuda = torch.cuda.is_available()
+print(f"\n  CUDA available : {'✅ Yes — ' + torch.cuda.get_device_name(0) if cuda else '❌ No — CPU only'}")
+if not ok:
+    sys.exit(1)
 PYEOF
 
 # ---------------------------------------------------------------------------
-# 5. Install application requirements (whisperx excluded — handled below)
+# Create working directories
 # ---------------------------------------------------------------------------
-echo "[5/7] Installing Python requirements …"
-# Install numpy first to guarantee 1.x is used (some deps pull 2.x).
-pip install --quiet "numpy==1.26.4"
-
-# ctranslate2 must be installed before faster-whisper.
-pip install --quiet "ctranslate2==4.4.0"
-
-# Install the rest of requirements.txt (torch/torchaudio already satisfied).
-pip install --quiet -r requirements.txt
-
-# ---------------------------------------------------------------------------
-# 6. Install WhisperX AFTER torch (no-deps avoids torch version conflicts)
-# ---------------------------------------------------------------------------
-echo "[6/7] Installing WhisperX (--no-deps, pinned commit) …"
-pip install --quiet --no-deps \
-    git+https://github.com/m-bain/whisperX.git@v3.3.1
-
-# ---------------------------------------------------------------------------
-# 7. Create working directories
-# ---------------------------------------------------------------------------
-echo "[7/7] Creating working directories …"
-mkdir -p uploads outputs temp models
+mkdir -p /content/uploads /content/outputs /content/temp /content/models
 
 echo ""
 echo "============================================================"
 echo " Setup complete!  Next steps:"
 echo ""
-echo "   • Set environment variables (see .env.example):"
-echo "       export WHISPER_HF_TOKEN=hf_..."
-echo "       export WHISPER_API_KEYS=my-secret-key"
+echo "   1. Fill in env vars (Section 5 of the Colab notebook):"
+echo "        export WHISPER_HF_TOKEN=hf_..."
+echo "        export WHISPER_API_KEYS=my-secret-key"
 echo ""
-echo "   • Start the API in one cell:"
-echo "       !uvicorn app.main:app --host 0.0.0.0 --port 8000 &"
+echo "   2. Start the API:"
+echo "        uvicorn app.main:app --host 0.0.0.0 --port 8000 &"
 echo ""
-echo "   • Start the worker in another cell:"
-echo "       !rq worker transcription --url redis://localhost:6379/0 &"
+echo "   3. Start the worker:"
+echo "        rq worker transcription --url redis://localhost:6379/0 &"
 echo "============================================================"

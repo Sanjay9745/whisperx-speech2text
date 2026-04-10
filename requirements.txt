@@ -1,69 +1,72 @@
 # =============================================================================
 # requirements.txt — Speech-to-Text API
 #
-# NOTE: WhisperX is NOT listed here because it conflicts with the system
-# torch version. It must be installed separately AFTER torch:
+# NOTE: WhisperX is NOT listed here because it must be installed AFTER torch
+# with --no-deps to prevent pip from downgrading/changing the torch version.
 #
-#   pip install --no-deps git+https://github.com/m-bain/whisperX.git@v3.3.1
+# Install command (run AFTER all deps below are installed):
+#   pip install --no-deps git+https://github.com/m-bain/whisperX.git@v3.8.5
 #
-# See colab_setup.sh and the Colab notebook for the correct install order.
+# Colab users: run the notebook cell in speech2text_colab.ipynb instead —
+#   it handles the correct install order automatically.
 # =============================================================================
 
 # --- Core Framework ---
-fastapi==0.115.5
-uvicorn[standard]==0.32.1
-python-multipart==0.0.12
+# Ranges allow coexistence with Colab's pre-installed google-adk / gradio.
+fastapi>=0.124.1,<2.0.0
+uvicorn[standard]>=0.34.0,<2.0.0
+starlette>=0.49.1,<2.0.0
+python-multipart>=0.0.18
 
 # --- Queue & Cache ---
-redis==5.2.0
-rq==2.0.0
+redis>=5.2.0,<6.0.0
+rq>=2.0.0,<3.0.0
 
 # --- Audio Processing ---
-# faster-whisper must match your torch/ctranslate2 build.
-# ctranslate2 3.x => torch 2.x  (works on CUDA 12.x)
-faster-whisper==1.1.0
-ctranslate2==4.4.0
+# faster-whisper 1.2+ is required by whisperx v3.8.5
+faster-whisper>=1.2.0
+# ctranslate2 4.5+ required by whisperx v3.8.5
+ctranslate2>=4.5.0
 
-# silero-vad from PyPI (not the torch.hub version to avoid network calls at runtime)
-silero-vad==5.1.2
+# Silero-VAD (speech detection before chunking)
+silero-vad>=5.1.2
 
-pydub==0.25.1
-soundfile==0.12.1
-# librosa 0.10.x works with numpy <2.0 AND >=2.0 via lazy compat shims
-librosa==0.10.2.post1
+pydub>=0.25.1
+soundfile>=0.12.1
+librosa>=0.10.2
 
 # --- Speaker Diarization ---
-# pyannote.audio 3.3.x is the last release compatible with torch 2.x
-pyannote.audio==3.3.2
-pyannote.core==5.0.0
-pyannote.pipeline==3.0.1
+# pyannote.audio 4.x is required by whisperx v3.8.5
+pyannote.audio>=4.0.0
+pyannote.core>=5.0.0
+pyannote.pipeline>=3.0.1
 
-# --- WhisperX runtime deps (installed independently of whisperx itself) ---
-pandas==2.2.3
-nltk==3.9.1
+# --- WhisperX runtime deps (installed without whisperx to avoid torch conflicts) ---
+pandas>=2.2.3
+nltk>=3.9.1
+omegaconf>=2.3.0
 
-# --- Hugging Face Hub ---
-# pin below 0.26 to avoid breaking pyannote token auth
-huggingface-hub==0.25.2
-tokenizers==0.20.3
-transformers==4.46.3
+# --- Hugging Face ---
+# >=0.33.5 required by gradio/diffusers; <1.0.0 avoids breaking API changes
+huggingface-hub>=0.33.5,<1.0.0
+transformers>=4.48.0
 
 # --- Configuration ---
-pyyaml==6.0.2
+pyyaml>=6.0.2
 
 # --- HTTP ---
-httpx==0.27.2
-aiofiles==24.1.0
+# >=0.28.1 required by google-genai / firebase-admin in Colab
+httpx>=0.28.1
+aiofiles>=24.1.0
 
 # --- Utilities ---
-# numpy 1.x is required by librosa + pyannote on Python 3.10/3.11.
-# numpy 2.x breaks several downstream C extensions. Keep at 1.26.x.
-numpy==1.26.4
-# torch/torchaudio must be installed via --index-url (see colab_setup.sh).
-# List them here so pip freeze / dependency checkers are aware of the versions,
-# but the CUDA wheel must be pulled from the PyTorch index separately.
-torch==2.5.1
-torchaudio==2.5.1
+# numpy 2.x is required by whisperx v3.8.5 and Colab's cupy/jax packages.
+# Do NOT pin to 1.x — it breaks half of Colab's pre-installed packages.
+numpy>=2.1.0
+# torch and torchaudio: installed separately via PyTorch index (see colab_setup.sh).
+# Listed here for reference only — do not change these to match what's in Colab.
+torch>=2.5.1
+torchaudio>=2.5.1
 
 # --- Logging ---
-loguru==0.7.3
+loguru>=0.7.3

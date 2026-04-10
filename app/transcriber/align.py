@@ -6,8 +6,8 @@ the system torch version when resolved by pip normally.  This module
 gracefully degrades: if whisperx is not importable the original segments
 are returned untouched.
 
-Install command (run AFTER torch is installed):
-    pip install --no-deps git+https://github.com/m-bain/whisperX.git@v3.3.1
+Install command (run AFTER all other deps are installed):
+    pip install --no-deps git+https://github.com/m-bain/whisperX.git@v3.8.5
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ except ImportError:
     _WHISPERX_AVAILABLE = False
     logger.warning(
         "whisperx is NOT installed — word-level alignment will be skipped. "
-        "Install it with: pip install --no-deps git+https://github.com/m-bain/whisperX.git@v3.3.1"
+        "Install it with: pip install --no-deps git+https://github.com/m-bain/whisperX.git@v3.8.5"
     )
 
 
