@@ -1,4 +1,8 @@
 #!/bin/bash
+
+echo "Pulling latest code from GitHub..."
+git pull
+
 echo "Restarting services..."
 
 # Kill existing processes
