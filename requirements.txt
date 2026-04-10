@@ -1,7 +1,7 @@
 # --- Core Framework ---
-fastapi==0.109.2
-uvicorn[standard]==0.27.1
-python-multipart==0.0.9
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+python-multipart>=0.0.9
 
 # --- Queue & Cache ---
 redis==5.0.8
