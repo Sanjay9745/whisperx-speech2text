@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from loguru import logger
 
@@ -35,6 +36,16 @@ app = FastAPI(
     title="Speech-to-Text API",
     version="1.0.0",
     description="Production-grade speech transcription powered by faster-whisper",
+)
+
+# CORS — allow any origin so the HTML UI (served from a different tunnel URL)
+# can call this API directly from the browser.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # Security middleware
