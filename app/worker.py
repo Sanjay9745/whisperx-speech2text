@@ -67,6 +67,38 @@ def _has_transcript_content(
     return bool(text.strip() or words or any(seg.get("text", "").strip() for seg in segments))
 
 
+def _normalize_language(value: Any) -> str:
+    if not value:
+        return ""
+    return str(value).strip().lower()
+
+
+def _normalize_task(value: Any) -> str:
+    task = str(value or "transcribe").strip().lower()
+    return task if task in {"transcribe", "translate"} else "transcribe"
+
+
+def _language_hints_from_metadata(metadata: Dict[str, Any]) -> List[str]:
+    hints: List[str] = []
+
+    for key in ("language", "source_language", "language_hint"):
+        value = _normalize_language(metadata.get(key))
+        if value and value not in hints:
+            hints.append(value)
+
+    raw_hints = metadata.get("language_hints", [])
+    if isinstance(raw_hints, str):
+        raw_hints = [raw_hints]
+
+    if isinstance(raw_hints, list):
+        for value in raw_hints:
+            candidate = _normalize_language(value)
+            if candidate and candidate not in hints:
+                hints.append(candidate)
+
+    return hints
+
+
 def process_job(job_id: str) -> None:
     """Top-level handler invoked by RQ for each queued job."""
     logger.info(f"[{job_id}] Starting job")
@@ -83,6 +115,12 @@ def process_job(job_id: str) -> None:
         file_path: str = state["file_path"]
         metadata: Dict[str, Any] = state.get("metadata", {})
         webhook_url: str = state.get("webhook_url", "")
+        source_language = _normalize_language(
+            metadata.get("language") or metadata.get("source_language")
+        ) or None
+        task = _normalize_task(metadata.get("task"))
+        initial_prompt = str(metadata.get("initial_prompt", "")).strip() or None
+        language_hints = _language_hints_from_metadata(metadata)
 
         update_job(job_id, progress=5)
         logger.info(f"[{job_id}] Chunking audio: {file_path}")
@@ -102,7 +140,13 @@ def process_job(job_id: str) -> None:
 
         def _transcribe_one(idx: int):
             audio_arr, chunk_start, _chunk_end = chunks[idx]
-            result = transcribe_chunk(audio_arr)
+            result = transcribe_chunk(
+                audio_arr,
+                language=source_language,
+                task=task,
+                initial_prompt=initial_prompt,
+                language_hints=language_hints,
+            )
 
             for seg in result.get("segments", []):
                 seg["start"] = round(float(seg["start"]) + chunk_start, 3)
@@ -175,12 +219,15 @@ def process_job(job_id: str) -> None:
             raise RuntimeError(f"All transcription chunks failed. First error: {first_error}")
 
         update_job(job_id, progress=82)
-        logger.info(f"[{job_id}] Running alignment ...")
-        try:
-            audio_np, _sr = load_audio(file_path)
-            all_segments = align_segments(audio_np, all_segments, detected_language)
-        except Exception as align_err:
-            logger.warning(f"[{job_id}] Alignment skipped: {align_err}")
+        if task == "translate":
+            logger.info(f"[{job_id}] Skipping alignment for translation output")
+        else:
+            logger.info(f"[{job_id}] Running alignment ...")
+            try:
+                audio_np, _sr = load_audio(file_path)
+                all_segments = align_segments(audio_np, all_segments, detected_language)
+            except Exception as align_err:
+                logger.warning(f"[{job_id}] Alignment skipped: {align_err}")
 
         update_job(job_id, progress=88)
         speaker_turns: List[Dict[str, Any]] = []
@@ -202,6 +249,8 @@ def process_job(job_id: str) -> None:
             warnings.append(
                 f"{len(failed_chunks)} chunk(s) failed during transcription and were omitted."
             )
+        if task == "translate":
+            warnings.append("Alignment was skipped because translation output does not match source audio.")
         if final_text and not all_words:
             warnings.append("Transcript text was produced without word-level timestamps.")
 
@@ -217,6 +266,7 @@ def process_job(job_id: str) -> None:
             "words": all_words,
             "speakers": speaker_turns,
             "language": detected_language,
+            "task": task,
             "metadata": metadata,
             "warnings": warnings,
             "stats": {

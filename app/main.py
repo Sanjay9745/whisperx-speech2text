@@ -88,6 +88,10 @@ async def transcribe(
     audio_url: Optional[str] = Form(None),
     metadata: Optional[str] = Form(None),
     webhook_url: Optional[str] = Form(None),
+    language: Optional[str] = Form(None),
+    task: Optional[str] = Form(None),
+    initial_prompt: Optional[str] = Form(None),
+    language_hints: Optional[str] = Form(None),
 ):
     """
     Submit an audio file or URL for transcription.
@@ -103,6 +107,25 @@ async def transcribe(
             meta = json.loads(metadata)
         except json.JSONDecodeError:
             raise HTTPException(status_code=400, detail="metadata must be valid JSON")
+        if not isinstance(meta, dict):
+            raise HTTPException(status_code=400, detail="metadata must be a JSON object")
+
+    if language:
+        meta["language"] = str(language).strip().lower()
+    if task:
+        normalized_task = str(task).strip().lower()
+        if normalized_task not in {"transcribe", "translate"}:
+            raise HTTPException(
+                status_code=400,
+                detail="task must be either 'transcribe' or 'translate'",
+            )
+        meta["task"] = normalized_task
+    if initial_prompt:
+        meta["initial_prompt"] = initial_prompt
+    if language_hints:
+        hints = [value.strip().lower() for value in language_hints.split(",") if value.strip()]
+        if hints:
+            meta["language_hints"] = hints
 
     # ----- Resolve audio source -----
     audio_path: Optional[str] = None

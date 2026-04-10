@@ -7,7 +7,7 @@ Supports auto CUDA detection, FP16 / INT8 fallback.
 from __future__ import annotations
 
 import os
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -21,6 +21,7 @@ from app.config import get_config
 # ---------------------------------------------------------------------------
 
 _model: Optional[WhisperModel] = None
+_DEFAULT_FALLBACK_LANGUAGES = ("en",)
 
 
 def _detect_device_and_dtype() -> Tuple[str, str]:
@@ -97,22 +98,46 @@ def _approximate_words(text: str, start: float, end: float) -> List[Dict[str, An
     return words
 
 
-# ---------------------------------------------------------------------------
-# Transcribe a single audio chunk
-# ---------------------------------------------------------------------------
+def _normalize_task(task: Optional[str]) -> str:
+    if not task:
+        return "transcribe"
+    normalized = str(task).strip().lower()
+    return normalized if normalized in {"transcribe", "translate"} else "transcribe"
 
-def transcribe_chunk(
+
+def _normalize_language(language: Optional[str]) -> Optional[str]:
+    if not language:
+        return None
+    normalized = str(language).strip().lower()
+    return normalized or None
+
+
+def _normalize_language_hints(
+    language_hints: Optional[Iterable[str]],
+) -> List[str]:
+    normalized: List[str] = []
+    for language in language_hints or []:
+        candidate = _normalize_language(language)
+        if candidate and candidate not in normalized:
+            normalized.append(candidate)
+    return normalized
+
+
+def _has_content(result: Dict[str, Any]) -> bool:
+    if result.get("text", "").strip():
+        return True
+    return any(seg.get("text", "").strip() for seg in result.get("segments", []))
+
+
+def _run_transcription(
+    model: WhisperModel,
     audio: "np.ndarray | str",
     *,
-    language: Optional[str] = None,
+    language: Optional[str],
+    task: str,
+    initial_prompt: Optional[str],
 ) -> Dict[str, Any]:
-    """
-    Transcribe a single audio chunk.
-    *audio* may be a numpy float32 array (16 kHz mono) or a file path.
-    Returns dict with keys: text, segments, language, language_probability.
-    """
     cfg = get_config()
-    model = load_model()
 
     segments_iter, info = model.transcribe(
         audio,
@@ -120,11 +145,15 @@ def transcribe_chunk(
         best_of=cfg.accuracy.best_of,
         temperature=cfg.accuracy.temperature,
         language=language,
-        # NOTE: do NOT pass batch_size here.
-        # faster-whisper's batch_size is only for its built-in VAD pipeline;
-        # passing it with vad_filter=False + word_timestamps=True causes the
-        # model to return empty segments on short audio chunks.
-        vad_filter=False,       # VAD is handled externally (chunker.py)
+        task=task,
+        initial_prompt=initial_prompt,
+        # Chunks are already isolated with external VAD, so disabling these
+        # filters avoids valid low-confidence speech getting dropped.
+        compression_ratio_threshold=None,
+        log_prob_threshold=None,
+        no_speech_threshold=None,
+        condition_on_previous_text=False,
+        vad_filter=False,
         word_timestamps=True,
     )
 
@@ -171,3 +200,65 @@ def transcribe_chunk(
         "language": info.language or language or "unknown",
         "language_probability": round(info.language_probability or 0.0, 4),
     }
+
+
+# ---------------------------------------------------------------------------
+# Transcribe a single audio chunk
+# ---------------------------------------------------------------------------
+
+def transcribe_chunk(
+    audio: "np.ndarray | str",
+    *,
+    language: Optional[str] = None,
+    task: Optional[str] = None,
+    initial_prompt: Optional[str] = None,
+    language_hints: Optional[Iterable[str]] = None,
+) -> Dict[str, Any]:
+    """
+    Transcribe a single audio chunk.
+    *audio* may be a numpy float32 array (16 kHz mono) or a file path.
+    Returns dict with keys: text, segments, language, language_probability.
+    """
+    model = load_model()
+    normalized_language = _normalize_language(language)
+    normalized_task = _normalize_task(task)
+    normalized_hints = _normalize_language_hints(language_hints)
+
+    result = _run_transcription(
+        model,
+        audio,
+        language=normalized_language,
+        task=normalized_task,
+        initial_prompt=initial_prompt,
+    )
+
+    if _has_content(result) or normalized_language:
+        return result
+
+    candidate_languages: List[str] = []
+    for candidate in normalized_hints + list(_DEFAULT_FALLBACK_LANGUAGES):
+        if candidate not in candidate_languages:
+            candidate_languages.append(candidate)
+
+    for candidate_language in candidate_languages:
+        if candidate_language == result.get("language"):
+            continue
+
+        logger.warning(
+            "Transcription returned no text; retrying with language hint "
+            f"'{candidate_language}' instead of auto-detected "
+            f"'{result.get('language', 'unknown')}'"
+        )
+        retried = _run_transcription(
+            model,
+            audio,
+            language=candidate_language,
+            task=normalized_task,
+            initial_prompt=initial_prompt,
+        )
+        if _has_content(retried):
+            return retried
+        if retried.get("language") and retried["language"] != "unknown":
+            result = retried
+
+    return result
