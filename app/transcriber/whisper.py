@@ -72,6 +72,31 @@ def load_model() -> WhisperModel:
     return _model
 
 
+def _approximate_words(text: str, start: float, end: float) -> List[Dict[str, Any]]:
+    """
+    Build fallback word timings when text is present but the backend did not
+    return per-word timestamps.
+    """
+    tokens = [token for token in text.split() if token.strip()]
+    if not tokens or end <= start:
+        return []
+
+    step = (end - start) / len(tokens)
+    words: List[Dict[str, Any]] = []
+    for index, token in enumerate(tokens):
+        word_start = start + (index * step)
+        word_end = end if index == len(tokens) - 1 else start + ((index + 1) * step)
+        words.append(
+            {
+                "word": token,
+                "start": round(word_start, 3),
+                "end": round(word_end, 3),
+                "estimated": True,
+            }
+        )
+    return words
+
+
 # ---------------------------------------------------------------------------
 # Transcribe a single audio chunk
 # ---------------------------------------------------------------------------
@@ -107,31 +132,42 @@ def transcribe_chunk(
     full_text_parts: List[str] = []
 
     for seg in segments_iter:
-        words = []
+        segment_text = seg.text.strip()
+        words: List[Dict[str, Any]] = []
         if seg.words:
             for w in seg.words:
+                if w.start is None or w.end is None:
+                    continue
+                word_text = w.word.strip()
+                if not word_text:
+                    continue
                 words.append(
                     {
-                        "word": w.word.strip(),
+                        "word": word_text,
                         "start": round(w.start, 3),
                         "end": round(w.end, 3),
                         "probability": round(w.probability, 4),
                     }
                 )
+
+        if not words and segment_text:
+            words = _approximate_words(segment_text, seg.start, seg.end)
+
         segments.append(
             {
                 "id": seg.id,
                 "start": round(seg.start, 3),
                 "end": round(seg.end, 3),
-                "text": seg.text.strip(),
+                "text": segment_text,
                 "words": words,
             }
         )
-        full_text_parts.append(seg.text.strip())
+        if segment_text:
+            full_text_parts.append(segment_text)
 
     return {
-        "text": " ".join(full_text_parts),
+        "text": " ".join(full_text_parts).strip(),
         "segments": segments,
-        "language": info.language,
-        "language_probability": round(info.language_probability, 4),
+        "language": info.language or language or "unknown",
+        "language_probability": round(info.language_probability or 0.0, 4),
     }

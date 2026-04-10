@@ -1,13 +1,9 @@
 """
-WhisperX word-level alignment (optional).
+Optional WhisperX-based word alignment.
 
-WhisperX is installed separately (after torch) because it conflicts with
-the system torch version when resolved by pip normally.  This module
-gracefully degrades: if whisperx is not importable the original segments
-are returned untouched.
-
-Install command (run AFTER all other deps are installed):
-    pip install --no-deps git+https://github.com/m-bain/whisperX.git@v3.8.5
+When WhisperX is unavailable or returns incomplete data, the original
+segments are preserved instead of replacing good transcription output with
+empty words.
 """
 
 from __future__ import annotations
@@ -19,36 +15,58 @@ from loguru import logger
 
 from app.config import get_config
 
-# Check once at module load time so the warning appears in startup logs.
 try:
     import whisperx as _whisperx_probe  # noqa: F401
+
     _WHISPERX_AVAILABLE = True
-    logger.info("whisperx found — word-level alignment enabled")
+    logger.info("whisperx found - word-level alignment enabled")
 except ImportError:
     _WHISPERX_AVAILABLE = False
     logger.warning(
-        "whisperx is NOT installed — word-level alignment will be skipped. "
-        "Install it with: pip install --no-deps git+https://github.com/m-bain/whisperX.git@v3.8.5"
+        "whisperx is NOT installed - word-level alignment will be skipped. "
+        "Install it with: pip install --no-deps "
+        "git+https://github.com/m-bain/whisperX.git@v3.8.5"
     )
 
 
+def _segment_text_present(segments: List[Dict[str, Any]]) -> bool:
+    return any(seg.get("text", "").strip() for seg in segments)
+
+
+def _word_count(segments: List[Dict[str, Any]]) -> int:
+    return sum(
+        1
+        for seg in segments
+        for word in seg.get("words", [])
+        if word.get("word", "").strip()
+    )
+
+
+def _alignment_is_usable(
+    original: List[Dict[str, Any]],
+    aligned: List[Dict[str, Any]],
+) -> bool:
+    if not aligned:
+        return False
+    if _segment_text_present(original) and not _segment_text_present(aligned):
+        return False
+    if _word_count(original) > 0 and _word_count(aligned) == 0:
+        return False
+    return True
+
+
 def align_segments(
-    audio: Any,  # numpy float32 array, 16 kHz mono
+    audio: Any,
     segments: List[Dict[str, Any]],
     language: str,
 ) -> List[Dict[str, Any]]:
     """
-    Use WhisperX to refine word-level timestamps.
-    Returns the original *segments* unchanged when whisperx is unavailable
-    or when alignment raises an exception.
+    Refine word timestamps with WhisperX when available.
     """
-    if not _WHISPERX_AVAILABLE:
+    if not _WHISPERX_AVAILABLE or not segments:
         return segments
 
-    if not segments:
-        return segments
-
-    import whisperx  # safe: we checked availability above
+    import whisperx
 
     cfg = get_config()
     device = "cuda" if torch.cuda.is_available() and cfg.model.device == "cuda" else "cpu"
@@ -61,7 +79,6 @@ def align_segments(
             device=device,
         )
 
-        # WhisperX expects a minimal segment format
         whisperx_segments = [
             {"start": seg["start"], "end": seg["end"], "text": seg["text"]}
             for seg in segments
@@ -77,32 +94,44 @@ def align_segments(
         )
 
         aligned_segments = aligned.get("segments", [])
-
         result: List[Dict[str, Any]] = []
-        for i, aseg in enumerate(aligned_segments):
-            words = [
-                {
-                    "word": w.get("word", "").strip(),
-                    "start": round(w.get("start", 0.0), 3),
-                    "end": round(w.get("end", 0.0), 3),
-                    "score": round(w.get("score", 0.0), 4),
-                }
-                for w in aseg.get("words", [])
-            ]
+
+        for index, aligned_segment in enumerate(aligned_segments):
+            words = []
+            for word in aligned_segment.get("words", []):
+                word_text = word.get("word", "").strip()
+                start = word.get("start")
+                end = word.get("end")
+                if not word_text or start is None or end is None:
+                    continue
+                words.append(
+                    {
+                        "word": word_text,
+                        "start": round(start, 3),
+                        "end": round(end, 3),
+                        "score": round(word.get("score", 0.0), 4),
+                    }
+                )
+
             result.append(
                 {
-                    "id": i,
-                    "start": round(aseg.get("start", 0.0), 3),
-                    "end": round(aseg.get("end", 0.0), 3),
-                    "text": aseg.get("text", "").strip(),
+                    "id": index,
+                    "start": round(aligned_segment.get("start", 0.0), 3),
+                    "end": round(aligned_segment.get("end", 0.0), 3),
+                    "text": aligned_segment.get("text", "").strip(),
                     "words": words,
                 }
             )
+
+        if not _alignment_is_usable(segments, result):
+            logger.warning(
+                "WhisperX alignment returned incomplete data; keeping original segments"
+            )
+            return segments
 
         logger.info(f"WhisperX alignment refined {len(result)} segments")
         return result
 
     except Exception as exc:
-        logger.error(f"WhisperX alignment failed: {exc} — falling back to original segments")
+        logger.error(f"WhisperX alignment failed: {exc} - falling back to original segments")
         return segments
-
