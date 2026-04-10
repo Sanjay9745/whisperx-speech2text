@@ -10,7 +10,7 @@ rq==2.1.0
 # --- Audio Processing ---
 # WhisperX currently requires faster-whisper>=1.2.0.
 faster-whisper==1.2.0
-whisperx @ git+https://github.com/m-bain/whisperX.git@v3.7.9
+whisperx @ git+https://github.com/m-bain/whisperX.git
 silero-vad==5.1.2
 pydub==0.25.1
 soundfile==0.13.1
