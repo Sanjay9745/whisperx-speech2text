@@ -238,8 +238,10 @@ def process_job(job_id: str) -> None:
             raise RuntimeError(f"All transcription chunks failed. First error: {first_error}")
 
         update_job(job_id, progress=82)
+        alignment_skipped_reason: str = ""
         if task == "translate":
-            logger.info(f"[{job_id}] Skipping alignment for translation output")
+            logger.info(f"[{job_id}] Skipping alignment — translate output cannot be force-aligned to source audio")
+            alignment_skipped_reason = "translate"
         else:
             logger.info(f"[{job_id}] Running alignment ...")
             try:
@@ -247,6 +249,7 @@ def process_job(job_id: str) -> None:
                 all_segments = align_segments(audio_np, all_segments, detected_language)
             except Exception as align_err:
                 logger.warning(f"[{job_id}] Alignment skipped: {align_err}")
+                alignment_skipped_reason = str(align_err)
 
         update_job(job_id, progress=88)
         speaker_turns: List[Dict[str, Any]] = []
@@ -293,8 +296,13 @@ def process_job(job_id: str) -> None:
             warnings.append(
                 f"{len(failed_chunks)} chunk(s) failed during transcription and were omitted."
             )
-        if task == "translate":
-            warnings.append("Alignment was skipped because translation output does not match source audio.")
+        if alignment_skipped_reason == "translate":
+            warnings.append(
+                "Alignment was skipped: translate mode produces English text that does not "
+                "match source-language audio timestamps."
+            )
+        elif alignment_skipped_reason:
+            warnings.append(f"Word-level alignment skipped: {alignment_skipped_reason}")
         if final_text and not all_words:
             warnings.append("Transcript text was produced without word-level timestamps.")
         if cfg.diarization.enabled and all_segments and not any(
@@ -304,16 +312,12 @@ def process_job(job_id: str) -> None:
             warnings.append(
                 "Speaker labels were not attached to transcript segments. "
                 + (
-                    "The Hugging Face token (WHISPER_HF_TOKEN) is NOT set — "
-                    "diarization requires a valid token. "
-                    "Get one at https://huggingface.co/settings/tokens and "
-                    "accept model terms at https://huggingface.co/pyannote/speaker-diarization-3.1"
+                    "WHISPER_HF_TOKEN is not set — diarization requires a valid HF token. "
+                    "Get one at https://huggingface.co/settings/tokens"
                     if not hf_token_set
-                    else "The HF token is set but diarization still failed. "
-                    "Check the worker logs for errors. Common causes: "
-                    "(1) Token has not accepted pyannote model terms, "
-                    "(2) pyannote.audio version incompatible with torch, "
-                    "(3) Insufficient GPU memory."
+                    else "The HF token is set but no speaker turns were detected. "
+                    "This is normal for very short audio (< 10 s) or single-speaker recordings. "
+                    "For multi-speaker audio, check the worker log for pipeline errors."
                 )
             )
 
