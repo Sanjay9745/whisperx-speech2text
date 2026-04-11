@@ -156,8 +156,18 @@ def diarize(audio_path: str) -> List[Dict[str, Any]]:
         logger.info(f"Running diarization on {audio_path} ...")
         diarization_result = pipeline(audio_path)
 
+        # pyannote.audio 4.x returns DiarizeOutput; 3.x returns Annotation.
+        # DiarizeOutput wraps the Annotation in .speaker_diarization.
+        annotation = getattr(
+            diarization_result, "speaker_diarization", diarization_result
+        )
+        logger.debug(
+            f"Pipeline returned {type(diarization_result).__name__}; "
+            f"using {type(annotation).__name__} for itertracks"
+        )
+
         raw_turns: List[Dict[str, Any]] = []
-        for turn, _, speaker in diarization_result.itertracks(yield_label=True):
+        for turn, _, speaker in annotation.itertracks(yield_label=True):
             raw_turns.append(
                 {
                     "start": round(turn.start, 3),
