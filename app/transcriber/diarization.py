@@ -139,6 +139,36 @@ def _load_pipeline():
         return None
 
 
+def _load_audio_for_diarization(audio_path: str) -> Dict[str, Any]:
+    """
+    Pre-load audio into memory as a dict accepted by pyannote Pipeline.
+
+    pyannote's internal ``Audio.crop()`` relies on ffmpeg / torchaudio to read
+    the file, and its duration comes from container metadata.  For container
+    formats like **.mp4 / .mkv / .webm** the reported duration can exceed the
+    actual number of decoded samples, causing::
+
+        "requested chunk [...] resulted in N samples instead of expected M"
+
+    By loading with **librosa** (which always returns exactly the decoded
+    samples) and passing the waveform as an in-memory dict we bypass
+    pyannote's file I/O entirely, eliminating the mismatch.
+
+    Returns ``{"waveform": Tensor(1, T), "sample_rate": 16000}``.
+    """
+    from app.transcriber.chunker import load_audio  # already handles all formats
+
+    logger.info(f"Pre-loading audio for diarization: {audio_path}")
+    audio_np, sr = load_audio(audio_path, sr=16_000)
+    duration_sec = len(audio_np) / sr
+    logger.info(
+        f"Audio loaded: {duration_sec:.1f}s, {len(audio_np)} samples @ {sr} Hz"
+    )
+
+    waveform = torch.from_numpy(audio_np).unsqueeze(0).float()  # (1, T)
+    return {"waveform": waveform, "sample_rate": sr}
+
+
 def diarize(audio_path: str) -> List[Dict[str, Any]]:
     """
     Run speaker diarization on *audio_path*.
@@ -153,8 +183,11 @@ def diarize(audio_path: str) -> List[Dict[str, Any]]:
         return []
 
     try:
+        # Pre-load audio into memory to avoid pyannote's ffmpeg duration
+        # mismatch with container formats (.mp4, .mkv, .webm, etc.).
+        audio_input = _load_audio_for_diarization(audio_path)
         logger.info(f"Running diarization on {audio_path} ...")
-        diarization_result = pipeline(audio_path)
+        diarization_result = pipeline(audio_input)
 
         # pyannote.audio 4.x returns DiarizeOutput; 3.x returns Annotation.
         # DiarizeOutput wraps the Annotation in .speaker_diarization.
