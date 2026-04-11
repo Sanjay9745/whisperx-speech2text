@@ -92,6 +92,8 @@ async def transcribe(
     task: Optional[str] = Form(None),
     initial_prompt: Optional[str] = Form(None),
     language_hints: Optional[str] = Form(None),
+    min_speakers: Optional[int] = Form(None),
+    max_speakers: Optional[int] = Form(None),
 ):
     """
     Submit an audio file or URL for transcription.
@@ -126,6 +128,10 @@ async def transcribe(
         hints = [value.strip().lower() for value in language_hints.split(",") if value.strip()]
         if hints:
             meta["language_hints"] = hints
+    if min_speakers is not None and min_speakers > 0:
+        meta["min_speakers"] = min_speakers
+    if max_speakers is not None and max_speakers > 0:
+        meta["max_speakers"] = max_speakers
 
     # ----- Resolve audio source -----
     audio_path: Optional[str] = None

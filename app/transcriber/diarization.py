@@ -170,9 +170,23 @@ def _load_audio_for_diarization(audio_path: str) -> Dict[str, Any]:
     return {"waveform": waveform, "sample_rate": sr}
 
 
-def diarize(audio_path: str) -> List[Dict[str, Any]]:
+def diarize(
+    audio_path: str,
+    *,
+    min_speakers: Optional[int] = None,
+    max_speakers: Optional[int] = None,
+    num_speakers: Optional[int] = None,
+) -> List[Dict[str, Any]]:
     """
     Run speaker diarization on *audio_path*.
+
+    Parameters
+    ----------
+    min_speakers / max_speakers / num_speakers
+        Hints passed directly to pyannote's pipeline.  ``num_speakers``
+        takes precedence when set.  These dramatically improve accuracy
+        for conversational audio where the speaker count is known.
+
     Returns list of {start, end, speaker}.
     """
     pipeline = _load_pipeline()
@@ -187,8 +201,22 @@ def diarize(audio_path: str) -> List[Dict[str, Any]]:
         # Pre-load audio into memory to avoid pyannote's ffmpeg duration
         # mismatch with container formats (.mp4, .mkv, .webm, etc.).
         audio_input = _load_audio_for_diarization(audio_path)
+
+        # Build optional kwargs for speaker count hints
+        pipeline_kwargs: Dict[str, Any] = {}
+        if num_speakers is not None and num_speakers > 0:
+            pipeline_kwargs["num_speakers"] = num_speakers
+            logger.info(f"Diarization: num_speakers={num_speakers}")
+        else:
+            if min_speakers is not None and min_speakers > 0:
+                pipeline_kwargs["min_speakers"] = min_speakers
+            if max_speakers is not None and max_speakers > 0:
+                pipeline_kwargs["max_speakers"] = max_speakers
+            if pipeline_kwargs:
+                logger.info(f"Diarization: {pipeline_kwargs}")
+
         logger.info(f"Running diarization on {audio_path} ...")
-        diarization_result = pipeline(audio_input)
+        diarization_result = pipeline(audio_input, **pipeline_kwargs)
 
         # pyannote.audio 4.x returns DiarizeOutput; 3.x returns Annotation.
         # DiarizeOutput wraps the Annotation in .speaker_diarization.
@@ -359,6 +387,112 @@ def assign_speakers(
     )
 
     return segments
+
+
+def resegment_by_speakers(
+    segments: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """
+    Split segments at speaker-change boundaries.
+
+    Whisper creates segments based on *content* boundaries (sentences,
+    pauses) — NOT speaker changes.  This means a single Whisper segment
+    may contain words from two speakers when they speak in quick
+    succession (common in conversations).
+
+    After ``assign_speakers()`` has labeled each **word** with its speaker,
+    this function walks through every segment and splits it whenever the
+    speaker changes between consecutive words.  The result is a list of
+    segments where **each segment has exactly one speaker**.
+
+    Segments without words are passed through unchanged.
+    """
+    if not segments:
+        return segments
+
+    new_segments: List[Dict[str, Any]] = []
+    seg_id = 1
+
+    for seg in segments:
+        words = seg.get("words", [])
+        if not words:
+            # No words → keep as-is
+            seg["id"] = seg_id
+            new_segments.append(seg)
+            seg_id += 1
+            continue
+
+        # Group consecutive words by speaker
+        groups: List[List[Dict[str, Any]]] = []
+        current_group: List[Dict[str, Any]] = [words[0]]
+        current_speaker = str(words[0].get("speaker", ""))
+
+        for w in words[1:]:
+            w_speaker = str(w.get("speaker", ""))
+            if w_speaker == current_speaker:
+                current_group.append(w)
+            else:
+                groups.append(current_group)
+                current_group = [w]
+                current_speaker = w_speaker
+
+        groups.append(current_group)
+
+        if len(groups) == 1:
+            # No speaker change — keep segment intact
+            seg["id"] = seg_id
+            new_segments.append(seg)
+            seg_id += 1
+            continue
+
+        # Multiple speakers in this segment → split
+        for group_words in groups:
+            group_speaker = str(group_words[0].get("speaker", "UNKNOWN"))
+            group_speaker_id = ""
+            for gw in group_words:
+                sid = str(gw.get("speaker_id", "")).strip()
+                if sid:
+                    group_speaker_id = sid
+                    break
+
+            group_text = " ".join(
+                str(w.get("word", "")).strip() for w in group_words
+            ).strip()
+
+            # Determine time range from word timestamps
+            starts = [
+                _safe_time(w.get("start"))
+                for w in group_words
+                if w.get("start") is not None
+            ]
+            ends = [
+                _safe_time(w.get("end"))
+                for w in group_words
+                if w.get("end") is not None
+            ]
+            group_start = min(starts) if starts else _safe_time(seg.get("start"))
+            group_end = max(ends) if ends else _safe_time(seg.get("end"))
+
+            new_seg: Dict[str, Any] = {
+                "id": seg_id,
+                "start": round(group_start, 3),
+                "end": round(group_end, 3),
+                "text": group_text,
+                "words": group_words,
+                "speaker": group_speaker,
+            }
+            if group_speaker_id:
+                new_seg["speaker_id"] = group_speaker_id
+            new_segments.append(new_seg)
+            seg_id += 1
+
+    if len(new_segments) != len(segments):
+        logger.info(
+            f"Re-segmented by speaker changes: {len(segments)} → "
+            f"{len(new_segments)} segments"
+        )
+
+    return new_segments
 
 
 def _safe_time(value: Any, default: float = 0.0) -> float:

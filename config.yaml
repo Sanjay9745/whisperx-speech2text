@@ -65,6 +65,7 @@ accuracy:
 # ---------------------------------------------------------------------------
 # Speaker diarization (pyannote.audio >= 4.x)
 # Env overrides: WHISPER_DIARIZATION_ENABLED | WHISPER_HF_TOKEN
+#                WHISPER_DIARIZATION_MIN_SPEAKERS | WHISPER_DIARIZATION_MAX_SPEAKERS
 #
 # !! IMPORTANT: You MUST set WHISPER_HF_TOKEN (or fill hf_token below)
 #    with a Hugging Face token that has accepted the pyannote model terms:
@@ -76,6 +77,14 @@ diarization:
   # Paste your HF token here OR export WHISPER_HF_TOKEN=<token> in the shell.
   # Never commit a real token to version control — use the env var instead.
   hf_token: ""
+
+  # Speaker count hints for pyannote (optional).
+  # Set min_speakers to 2 for conversational audio to force detection of
+  # at least 2 speakers, even when one dominates the recording.
+  # Can also be overridden per-request via the API's min_speakers/max_speakers
+  # form fields, or via the metadata JSON.
+  min_speakers:
+  max_speakers:
 
 # ---------------------------------------------------------------------------
 # Webhook delivery

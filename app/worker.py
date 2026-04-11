@@ -22,7 +22,7 @@ from app.queue import get_job_state, set_job_failed, set_job_result, update_job
 from app.result_formatter import build_formatted_transcript
 from app.transcriber.align import align_segments
 from app.transcriber.chunker import load_audio, prepare_chunks
-from app.transcriber.diarization import assign_speakers, diarize
+from app.transcriber.diarization import assign_speakers, diarize, resegment_by_speakers
 from app.transcriber.whisper import load_model, transcribe_chunk
 from app.webhook import deliver_webhook_sync
 
@@ -256,13 +256,28 @@ def process_job(job_id: str) -> None:
         if cfg.diarization.enabled:
             logger.info(f"[{job_id}] Running diarization ...")
             try:
-                speaker_turns = diarize(file_path)
+                # Resolve min/max speakers: metadata > config > defaults
+                diar_min = metadata.get("min_speakers") or cfg.diarization.min_speakers
+                diar_max = metadata.get("max_speakers") or cfg.diarization.max_speakers
+
+                diar_kwargs: Dict[str, Any] = {}
+                if diar_min:
+                    diar_kwargs["min_speakers"] = int(diar_min)
+                if diar_max:
+                    diar_kwargs["max_speakers"] = int(diar_max)
+
+                speaker_turns = diarize(file_path, **diar_kwargs)
                 if speaker_turns:
                     logger.info(
                         f"[{job_id}] Diarization returned {len(speaker_turns)} turns, "
                         f"assigning speakers to {len(all_segments)} segments ..."
                     )
                     all_segments = assign_speakers(all_segments, speaker_turns)
+
+                    # Re-segment at speaker-change boundaries so each
+                    # segment contains exactly one speaker.
+                    all_segments = resegment_by_speakers(all_segments)
+
                     assigned_count = sum(
                         1 for seg in all_segments
                         if str(seg.get("speaker", "")).strip()
