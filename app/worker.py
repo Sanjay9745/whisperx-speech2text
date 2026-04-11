@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import traceback
+from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List
 
@@ -256,14 +257,17 @@ def process_job(job_id: str) -> None:
         if cfg.diarization.enabled:
             logger.info(f"[{job_id}] Running diarization ...")
             try:
-                # Resolve min/max speakers: metadata > config > defaults
+                # Resolve speaker-count hints: metadata > config > defaults
+                diar_num = metadata.get("num_speakers") or cfg.diarization.num_speakers
                 diar_min = metadata.get("min_speakers") or cfg.diarization.min_speakers
                 diar_max = metadata.get("max_speakers") or cfg.diarization.max_speakers
 
                 diar_kwargs: Dict[str, Any] = {}
-                if diar_min:
+                if diar_num:
+                    diar_kwargs["num_speakers"] = int(diar_num)
+                if diar_min and not diar_kwargs.get("num_speakers"):
                     diar_kwargs["min_speakers"] = int(diar_min)
-                if diar_max:
+                if diar_max and not diar_kwargs.get("num_speakers"):
                     diar_kwargs["max_speakers"] = int(diar_max)
 
                 speaker_turns = diarize(file_path, **diar_kwargs)
@@ -272,11 +276,63 @@ def process_job(job_id: str) -> None:
                         f"[{job_id}] Diarization returned {len(speaker_turns)} turns, "
                         f"assigning speakers to {len(all_segments)} segments ..."
                     )
-                    all_segments = assign_speakers(all_segments, speaker_turns)
+                    turn_speakers = {
+                        str(turn.get("speaker", "")).strip()
+                        for turn in speaker_turns
+                        if str(turn.get("speaker", "")).strip()
+                    }
 
-                    # Re-segment at speaker-change boundaries so each
-                    # segment contains exactly one speaker.
-                    all_segments = resegment_by_speakers(all_segments)
+                    def _project_segments(
+                        segments: List[Dict[str, Any]],
+                        *,
+                        force_even_word_spread: bool,
+                        prefer_specific_turns: bool,
+                    ) -> List[Dict[str, Any]]:
+                        projected = assign_speakers(
+                            segments,
+                            speaker_turns,
+                            force_even_word_spread=force_even_word_spread,
+                            prefer_specific_turns=prefer_specific_turns,
+                        )
+                        return resegment_by_speakers(projected)
+
+                    projected_segments = _project_segments(
+                        deepcopy(all_segments),
+                        force_even_word_spread=(task == "translate"),
+                        prefer_specific_turns=False,
+                    )
+
+                    projected_speakers = {
+                        str(seg.get("speaker", "")).strip()
+                        for seg in projected_segments
+                        if str(seg.get("speaker", "")).strip() and seg.get("speaker") != "UNKNOWN"
+                    }
+
+                    if len(turn_speakers) > 1 and len(projected_speakers) <= 1:
+                        logger.warning(
+                            f"[{job_id}] Speaker turns indicate {len(turn_speakers)} speakers "
+                            "but transcript segments collapsed to one speaker. "
+                            "Retrying with stricter speaker-boundary projection ..."
+                        )
+                        strict_segments = _project_segments(
+                            deepcopy(all_segments),
+                            force_even_word_spread=True,
+                            prefer_specific_turns=True,
+                        )
+                        strict_speakers = {
+                            str(seg.get("speaker", "")).strip()
+                            for seg in strict_segments
+                            if str(seg.get("speaker", "")).strip() and seg.get("speaker") != "UNKNOWN"
+                        }
+                        if len(strict_speakers) > len(projected_speakers):
+                            projected_segments = strict_segments
+                            projected_speakers = strict_speakers
+                            logger.info(
+                                f"[{job_id}] Strict projection improved speaker coverage: "
+                                f"{len(projected_speakers)} segment speaker(s)"
+                            )
+
+                    all_segments = projected_segments
 
                     assigned_count = sum(
                         1 for seg in all_segments

@@ -231,6 +231,18 @@
       </div>
     </div>
 
+    <div class="row">
+      <div class="field">
+        <label>Expected Speakers  <span style="color:#64748b">(optional)</span></label>
+        <input id="numSpeakers" type="number" min="1" step="1" placeholder="e.g. 2" />
+        <div class="hint">Set this when you know the exact speaker count for the recording</div>
+      </div>
+      <div class="field">
+        <label>Speaker Hint</label>
+        <input type="text" value="Use `2` for interviews or question/answer audio" readonly style="color:#64748b;cursor:default" />
+      </div>
+    </div>
+
     <div class="gap-2" style="margin-top:0.5rem">
       <button id="btn-submit" class="btn btn-primary" onclick="submitJob()">▶ Submit job</button>
       <button id="btn-cancel" class="btn btn-danger hidden" onclick="cancelPoll()">⏹ Cancel poll</button>
@@ -336,7 +348,7 @@ let _webhooks   = [];
 // ============================================================================
 // Persist / restore settings
 // ============================================================================
-const SAVE_KEYS = ['apiUrl', 'apiKey', 'audioUrl', 'webhookUrl', 'metaJson'];
+const SAVE_KEYS = ['apiUrl', 'apiKey', 'audioUrl', 'webhookUrl', 'metaJson', 'numSpeakers'];
 window.addEventListener('DOMContentLoaded', () => {
   SAVE_KEYS.forEach(k => {
     const v = localStorage.getItem('s2t_' + k);
@@ -458,6 +470,12 @@ async function submitJob() {
   if (meta) {
     try { JSON.parse(meta); form.append('metadata', meta); }
     catch { log('Metadata JSON is invalid — skipping', 'warn'); }
+  }
+
+  const numSpeakers = parseInt(document.getElementById('numSpeakers').value, 10);
+  if (Number.isFinite(numSpeakers) && numSpeakers > 0) {
+    form.append('num_speakers', String(numSpeakers));
+    log(`Expected speakers: ${numSpeakers}`, 'info');
   }
 
   // Task (transcribe or translate)

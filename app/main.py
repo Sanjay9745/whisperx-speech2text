@@ -92,6 +92,7 @@ async def transcribe(
     task: Optional[str] = Form(None),
     initial_prompt: Optional[str] = Form(None),
     language_hints: Optional[str] = Form(None),
+    num_speakers: Optional[int] = Form(None),
     min_speakers: Optional[int] = Form(None),
     max_speakers: Optional[int] = Form(None),
 ):
@@ -128,6 +129,8 @@ async def transcribe(
         hints = [value.strip().lower() for value in language_hints.split(",") if value.strip()]
         if hints:
             meta["language_hints"] = hints
+    if num_speakers is not None and num_speakers > 0:
+        meta["num_speakers"] = num_speakers
     if min_speakers is not None and min_speakers > 0:
         meta["min_speakers"] = min_speakers
     if max_speakers is not None and max_speakers > 0:

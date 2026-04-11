@@ -262,25 +262,17 @@ def diarize(
 def assign_speakers(
     segments: List[Dict[str, Any]],
     speaker_turns: List[Dict[str, Any]],
+    *,
+    force_even_word_spread: bool = False,
+    prefer_specific_turns: bool = False,
 ) -> List[Dict[str, Any]]:
     """
     Assign a speaker label to each segment (and each word) based on
     overlap with diarization turns.
 
-    Strategy
-    --------
-    1. Build a sorted list of diarization turns.
-    2. For every word in a segment, find the turn with the greatest overlap.
-       - If word timestamps are *collapsed* (all identical — common in
-         ``translate`` mode where alignment is skipped), distribute the
-         words evenly across the segment's time range so each word gets a
-         distinct virtual timestamp.
-    3. Set the **segment-level** speaker to the speaker that owns the
-       majority of words in that segment.  This is more accurate than
-       picking the turn with the longest overlap against the entire
-       segment range, because a shorter minority-speaker turn that
-       dominates the first or second half of the segment will be
-       correctly captured.
+    Segments are first labeled at the word level and only then reduced
+    back to segment speaker runs. This avoids flattening a multi-speaker
+    segment down to a single majority speaker too early.
     """
     if not speaker_turns:
         return segments
@@ -292,9 +284,10 @@ def assign_speakers(
 
     def _find_speaker_at(point_start: float, point_end: float) -> Dict[str, Any]:
         """Find the best speaker turn for a given time range."""
-        best_overlap = 0.0
-        best_turn: Optional[Dict[str, Any]] = None
-        nearest_gap = float("inf")
+        midpoint = point_start + ((point_end - point_start) / 2.0)
+        containing_turns: List[Dict[str, Any]] = []
+        overlapping_turns: List[Dict[str, Any]] = []
+        nearest_distance = float("inf")
         nearest_turn: Optional[Dict[str, Any]] = None
 
         for turn in turns:
@@ -304,23 +297,58 @@ def assign_speakers(
             overlap_end = min(point_end, turn_end)
             overlap = max(0.0, overlap_end - overlap_start)
 
-            if overlap > best_overlap:
-                best_overlap = overlap
-                best_turn = turn
+            if turn_start <= midpoint <= turn_end:
+                containing_turns.append(turn)
+            if overlap > 0.0:
+                overlapping_turns.append(turn)
 
-            # For zero-length points, check containment
-            if point_start == point_end and turn_start <= point_start <= turn_end:
-                if best_overlap == 0.0:
-                    best_overlap = 0.001  # tiny but nonzero
-                    best_turn = turn
+            distance = min(abs(midpoint - turn_start), abs(midpoint - turn_end))
+            if turn_start <= midpoint <= turn_end:
+                distance = 0.0
+            if distance < nearest_distance:
+                nearest_distance = distance
+                nearest_turn = turn
 
-            if overlap == 0.0:
-                gap = min(abs(point_start - turn_end), abs(point_end - turn_start))
-                if gap < nearest_gap:
-                    nearest_gap = gap
-                    nearest_turn = turn
+        if containing_turns:
+            if prefer_specific_turns:
+                return min(
+                    containing_turns,
+                    key=lambda turn: (
+                        _safe_time(turn.get("end")) - _safe_time(turn.get("start")),
+                        abs(
+                            midpoint - (
+                                (_safe_time(turn.get("start")) + _safe_time(turn.get("end"))) / 2.0
+                            )
+                        ),
+                    ),
+                )
+            return max(
+                containing_turns,
+                key=lambda turn: (
+                    _overlap_ratio(turn, point_start, point_end),
+                    _overlap_amount(turn, point_start, point_end),
+                ),
+            )
 
-        return best_turn or nearest_turn or {"speaker": "UNKNOWN"}
+        if overlapping_turns:
+            if prefer_specific_turns:
+                return max(
+                    overlapping_turns,
+                    key=lambda turn: (
+                        _overlap_ratio(turn, point_start, point_end),
+                        -(_safe_time(turn.get("end")) - _safe_time(turn.get("start"))),
+                        _overlap_amount(turn, point_start, point_end),
+                    ),
+                )
+            return max(
+                overlapping_turns,
+                key=lambda turn: (
+                    _overlap_amount(turn, point_start, point_end),
+                    _overlap_ratio(turn, point_start, point_end),
+                ),
+            )
+
+        return nearest_turn or {"speaker": "UNKNOWN"}
 
     for seg in segments:
         seg_start = _safe_time(seg.get("start", 0.0))
@@ -328,20 +356,21 @@ def assign_speakers(
         words = seg.get("words", [])
 
         if words:
-            # Detect whether word timestamps are collapsed (all identical)
-            word_starts = [_safe_time(w.get("start", seg_start)) for w in words]
-            word_ends = [_safe_time(w.get("end", seg_end)) for w in words]
-            timestamps_collapsed = (
-                len(set(word_starts)) <= 2 and len(words) > 3
+            timestamps_unreliable = force_even_word_spread or _word_timestamps_unreliable(
+                words,
+                seg_start,
+                seg_end,
             )
 
-            if timestamps_collapsed and len(words) > 1:
+            if timestamps_unreliable and len(words) > 1:
                 # Distribute words evenly across the segment's time range
                 seg_dur = max(seg_end - seg_start, 0.001)
                 step = seg_dur / len(words)
                 for i, word in enumerate(words):
                     virt_start = seg_start + i * step
                     virt_end = seg_start + (i + 1) * step
+                    word["start"] = round(virt_start, 3)
+                    word["end"] = round(virt_end, 3)
                     matched = _find_speaker_at(virt_start, virt_end)
                     word["speaker"] = matched.get("speaker", "UNKNOWN")
                     spk_id = str(matched.get("speaker_id", "")).strip()
@@ -360,17 +389,14 @@ def assign_speakers(
                     if spk_id:
                         word["speaker_id"] = spk_id
 
-            # Determine segment speaker from word majority
-            speaker_counts = Counter(
-                str(w.get("speaker", "UNKNOWN")) for w in words
+            first_labeled_word = next(
+                (word for word in words if str(word.get("speaker", "")).strip()),
+                words[0],
             )
-            majority_speaker = speaker_counts.most_common(1)[0][0]
-            seg["speaker"] = majority_speaker
-            # Find matching speaker_id
-            for w in words:
-                if w.get("speaker") == majority_speaker and w.get("speaker_id"):
-                    seg["speaker_id"] = w["speaker_id"]
-                    break
+            seg["speaker"] = str(first_labeled_word.get("speaker", "UNKNOWN"))
+            first_speaker_id = str(first_labeled_word.get("speaker_id", "")).strip()
+            if first_speaker_id:
+                seg["speaker_id"] = first_speaker_id
         else:
             # No words — fall back to segment-level overlap
             matched = _find_speaker_at(seg_start, seg_end)
@@ -500,6 +526,47 @@ def _safe_time(value: Any, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _overlap_amount(turn: Dict[str, Any], start: float, end: float) -> float:
+    turn_start = _safe_time(turn.get("start"))
+    turn_end = _safe_time(turn.get("end"), turn_start)
+    return max(0.0, min(end, turn_end) - max(start, turn_start))
+
+
+def _overlap_ratio(turn: Dict[str, Any], start: float, end: float) -> float:
+    duration = max(end - start, 0.001)
+    return _overlap_amount(turn, start, end) / duration
+
+
+def _word_timestamps_unreliable(
+    words: List[Dict[str, Any]],
+    seg_start: float,
+    seg_end: float,
+) -> bool:
+    if len(words) <= 1:
+        return False
+
+    starts = [_safe_time(word.get("start", seg_start)) for word in words]
+    ends = [_safe_time(word.get("end", seg_end)) for word in words]
+    unique_starts = len({round(value, 3) for value in starts})
+    zero_length = sum(1 for start, end in zip(starts, ends) if end <= start)
+    non_monotonic = sum(
+        1 for index in range(1, len(starts)) if starts[index] < starts[index - 1]
+    )
+
+    seg_duration = max(seg_end - seg_start, 0.001)
+    covered_duration = max(ends) - min(starts) if ends and starts else 0.0
+
+    if unique_starts <= max(2, len(words) // 3):
+        return True
+    if zero_length >= max(2, len(words) // 3):
+        return True
+    if non_monotonic > 0:
+        return True
+    if seg_duration > 1.0 and covered_duration < (seg_duration * 0.45):
+        return True
+    return False
 
 
 def _display_speaker_name(raw_label: Any, fallback_index: int) -> str:

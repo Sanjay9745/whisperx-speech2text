@@ -15,6 +15,7 @@ Environment variable overrides (all optional, highest priority):
   WHISPER_BEST_OF             — int, best-of for sampling
   WHISPER_HF_TOKEN            — Hugging Face token for pyannote diarization
   WHISPER_DIARIZATION_ENABLED — 1/true/yes to enable diarization
+  WHISPER_DIARIZATION_NUM_SPEAKERS — int, exact expected speaker count
   WHISPER_DIARIZATION_MIN_SPEAKERS — int, minimum expected speakers (e.g. 2)
   WHISPER_DIARIZATION_MAX_SPEAKERS — int, maximum expected speakers (e.g. 5)
   WHISPER_WEBHOOK_ENABLED     — 1/true/yes to enable webhook delivery
@@ -90,6 +91,7 @@ class DiarizationConfig:
         self.enabled: bool = bool(data.get("enabled", True))
         self.hf_token: str = data.get("hf_token", "")
         # Optional speaker count hints passed to pyannote pipeline
+        self.num_speakers: Optional[int] = _opt_int(data.get("num_speakers"))
         self.min_speakers: Optional[int] = _opt_int(data.get("min_speakers"))
         self.max_speakers: Optional[int] = _opt_int(data.get("max_speakers"))
 
@@ -176,6 +178,8 @@ class AppConfig:
             self.diarization.hf_token = v
         if v := os.getenv("WHISPER_DIARIZATION_ENABLED"):
             self.diarization.enabled = _bool_env(v)
+        if v := os.getenv("WHISPER_DIARIZATION_NUM_SPEAKERS"):
+            self.diarization.num_speakers = _opt_int(v)
         if v := os.getenv("WHISPER_DIARIZATION_MIN_SPEAKERS"):
             self.diarization.min_speakers = _opt_int(v)
         if v := os.getenv("WHISPER_DIARIZATION_MAX_SPEAKERS"):
