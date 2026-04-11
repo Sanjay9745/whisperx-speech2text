@@ -124,11 +124,15 @@ SHIM = textwrap.dedent("""\
     import torch as _torch
     from packaging.version import Version as _V
     if _V(_torch.__version__.split("+")[0]) >= _V("2.6.0"):
-        _orig_load = _torch.load
-        def _safe_load(*a, **kw):
-            kw.setdefault("weights_only", False)
-            return _orig_load(*a, **kw)
-        _torch.load = _safe_load
+        if not getattr(_torch.load, "_pyannote_patched", False):
+            _orig_load = _torch.load
+            def _safe_load(*a, **kw):
+                # FORCE weights_only=False — pytorch-lightning passes True explicitly,
+                # so setdefault() has no effect; we must override it.
+                kw["weights_only"] = False
+                return _orig_load(*a, **kw)
+            _safe_load._pyannote_patched = True
+            _torch.load = _safe_load
     del _torch, _V
 """)
 if pyannote_init.exists():

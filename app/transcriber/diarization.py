@@ -28,29 +28,51 @@ _SPEAKER_LABEL_PATTERN = re.compile(r"speaker[_\s-]*(\d+)$", re.IGNORECASE)
 
 def _apply_torch_load_patch() -> None:
     """
-    Patch torch.load to default weights_only=False.
+    Patch torch.load to FORCE weights_only=False.
 
-    torch 2.6+ changed the default to True for security, but pyannote.audio
-    checkpoints contain OmegaConf DictConfig / ListConfig objects that are not
-    in PyTorch's safe-globals allowlist, causing UnpicklingError at load time.
+    torch 2.6+ changed the default to True for security, but:
+    - pyannote.audio checkpoints contain OmegaConf / TorchVersion objects not in
+      PyTorch's safe-globals allowlist → UnpicklingError.
+    - pytorch-lightning (used internally by pyannote) calls torch.load with
+      weights_only=True EXPLICITLY, so setdefault() is not enough — we must
+      OVERRIDE the value to False unconditionally.
 
-    This is the same workaround used by strato-transcripts (Jan 2026) and is
-    safe because we only load trusted HuggingFace official models.
+    We guard against double-patching by checking for our sentinel attribute.
+    This is safe because we only load trusted HuggingFace official models.
     """
+    # Guard: don't patch more than once (avoids recursive wrapper chains)
+    if getattr(torch.load, "_pyannote_patched", False):
+        logger.debug("torch.load already patched — skipping")
+        return
+
     try:
-        from packaging.version import Version
+        # Version check — only needed on torch >= 2.6
+        try:
+            from packaging.version import Version
+            need_patch = Version(torch.__version__.split("+")[0]) >= Version("2.6.0")
+        except ImportError:
+            parts = torch.__version__.split("+")[0].split(".")
+            major, minor = int(parts[0]), int(parts[1]) if len(parts) > 1 else 0
+            need_patch = (major, minor) >= (2, 6)
 
-        if Version(torch.__version__.split("+")[0]) >= Version("2.6.0"):
-            _orig = torch.load
+        if not need_patch:
+            logger.debug(f"torch.load patch not needed (torch {torch.__version__})")
+            return
 
-            def _patched_load(*args, **kwargs):
-                kwargs.setdefault("weights_only", False)
-                return _orig(*args, **kwargs)
+        _orig = torch.load
 
-            torch.load = _patched_load  # type: ignore[method-assign]
-            logger.debug("torch.load weights_only patch applied (torch>=2.6)")
+        def _patched_load(*args, **kwargs):
+            # FORCE weights_only=False — override even if caller passed True explicitly.
+            # Required because pytorch-lightning passes weights_only=True directly.
+            kwargs["weights_only"] = False
+            return _orig(*args, **kwargs)
+
+        _patched_load._pyannote_patched = True  # type: ignore[attr-defined]
+        torch.load = _patched_load  # type: ignore[method-assign]
+        logger.debug(f"torch.load weights_only=False patch applied (torch {torch.__version__})")
+
     except Exception as exc:
-        logger.debug(f"torch.load patch skipped: {exc}")
+        logger.warning(f"torch.load patch failed: {exc} — pyannote may fail to load checkpoints")
 
 
 def _load_pipeline():
@@ -61,33 +83,59 @@ def _load_pipeline():
 
     cfg = get_config()
     if not cfg.diarization.enabled:
+        logger.info("Diarization is disabled in config")
         return None
-    if not cfg.diarization.hf_token:
-        logger.warning("Diarization enabled but hf_token is empty - skipping diarization")
+
+    hf_token = cfg.diarization.hf_token
+    if not hf_token:
+        logger.error(
+            "Diarization enabled but hf_token is empty. "
+            "Set WHISPER_HF_TOKEN env var or diarization.hf_token in config.yaml. "
+            "Speaker labels will NOT be generated."
+        )
         return None
+
+    # Apply torch.load compat patch BEFORE importing pyannote.
+    _apply_torch_load_patch()
 
     try:
-        # Apply torch.load compat patch BEFORE importing pyannote.
-        _apply_torch_load_patch()
-
         from pyannote.audio import Pipeline
-
-        device = (
-            torch.device("cuda")
-            if torch.cuda.is_available() and cfg.model.device == "cuda"
-            else torch.device("cpu")
+    except ImportError as exc:
+        logger.error(
+            f"pyannote.audio is not installed or failed to import: {exc}. "
+            "Install it with: pip install pyannote.audio==4.0.1"
         )
+        return None
 
-        logger.info("Loading pyannote diarization pipeline ...")
+    device = (
+        torch.device("cuda")
+        if torch.cuda.is_available() and cfg.model.device == "cuda"
+        else torch.device("cpu")
+    )
+
+    try:
+        logger.info(
+            f"Loading pyannote diarization pipeline "
+            f"(token={hf_token[:8]}…, device={device}) ..."
+        )
         _pipeline = Pipeline.from_pretrained(
             "pyannote/speaker-diarization-3.1",
-            token=cfg.diarization.hf_token,  # pyannote 4.x uses 'token'
+            token=hf_token,
         )
         _pipeline = _pipeline.to(device)
-        logger.info("Diarization pipeline loaded")
+        logger.info("Diarization pipeline loaded successfully")
         return _pipeline
     except Exception as exc:
-        logger.error(f"Failed to load diarization pipeline: {exc}")
+        import traceback
+        logger.error(
+            f"Failed to load diarization pipeline: {exc}\n"
+            f"{traceback.format_exc()}\n"
+            "Common fixes:\n"
+            "  1. Accept model terms at https://huggingface.co/pyannote/speaker-diarization-3.1\n"
+            "  2. Accept model terms at https://huggingface.co/pyannote/segmentation-3.0\n"
+            "  3. Ensure your HF token has 'read' scope\n"
+            "  4. Check that pyannote.audio is compatible with your torch version"
+        )
         return None
 
 
@@ -98,6 +146,10 @@ def diarize(audio_path: str) -> List[Dict[str, Any]]:
     """
     pipeline = _load_pipeline()
     if pipeline is None:
+        logger.warning(
+            "Diarization pipeline is not available — returning empty speaker turns. "
+            "Check earlier log messages for the root cause."
+        )
         return []
 
     try:
@@ -114,12 +166,24 @@ def diarize(audio_path: str) -> List[Dict[str, Any]]:
                 }
             )
 
+        if not raw_turns:
+            logger.warning(
+                "Diarization completed but found zero speaker turns. "
+                "The audio may be too short or contain only one speaker."
+            )
+            return []
+
         turns = _normalize_turn_speakers(raw_turns)
-        logger.info(f"Diarization found {len(set(t['speaker'] for t in turns))} speakers")
+        unique_speakers = set(t['speaker'] for t in turns)
+        logger.info(
+            f"Diarization found {len(unique_speakers)} speaker(s) "
+            f"with {len(turns)} turn(s): {unique_speakers}"
+        )
         return turns
 
     except Exception as exc:
-        logger.error(f"Diarization failed: {exc}")
+        import traceback
+        logger.error(f"Diarization failed: {exc}\n{traceback.format_exc()}")
         return []
 
 

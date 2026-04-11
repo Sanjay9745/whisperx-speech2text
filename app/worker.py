@@ -36,8 +36,26 @@ def _warm_up() -> None:
         return
 
     try:
+        cfg = get_config()
         logger.info("Warming up Whisper model ...")
         load_model()
+
+        # Log diarization config status for debugging
+        if cfg.diarization.enabled:
+            hf_token = cfg.diarization.hf_token
+            if hf_token:
+                logger.info(
+                    f"Diarization is ENABLED (HF token: {hf_token[:8]}…)"
+                )
+            else:
+                logger.warning(
+                    "Diarization is ENABLED but WHISPER_HF_TOKEN is NOT SET. "
+                    "Speaker labels will not be generated. "
+                    "Set the WHISPER_HF_TOKEN environment variable."
+                )
+        else:
+            logger.info("Diarization is DISABLED in config")
+
         _warmed_up = True
         logger.info("Whisper model ready")
     except Exception as exc:
@@ -236,9 +254,33 @@ def process_job(job_id: str) -> None:
             logger.info(f"[{job_id}] Running diarization ...")
             try:
                 speaker_turns = diarize(file_path)
-                all_segments = assign_speakers(all_segments, speaker_turns)
+                if speaker_turns:
+                    logger.info(
+                        f"[{job_id}] Diarization returned {len(speaker_turns)} turns, "
+                        f"assigning speakers to {len(all_segments)} segments ..."
+                    )
+                    all_segments = assign_speakers(all_segments, speaker_turns)
+                    assigned_count = sum(
+                        1 for seg in all_segments
+                        if str(seg.get("speaker", "")).strip()
+                        and seg.get("speaker") != "UNKNOWN"
+                    )
+                    logger.info(
+                        f"[{job_id}] Speakers assigned to {assigned_count}/{len(all_segments)} segments"
+                    )
+                else:
+                    logger.warning(
+                        f"[{job_id}] Diarization returned no speaker turns — "
+                        "speakers will not be attached to segments. "
+                        "Check the worker log above for diarization pipeline errors."
+                    )
             except Exception as diar_err:
-                logger.warning(f"[{job_id}] Diarization skipped: {diar_err}")
+                import traceback as _tb
+                logger.warning(
+                    f"[{job_id}] Diarization failed: {diar_err}\n{_tb.format_exc()}"
+                )
+        else:
+            logger.info(f"[{job_id}] Diarization is disabled in config")
 
         update_job(job_id, progress=95)
 
@@ -258,9 +300,21 @@ def process_job(job_id: str) -> None:
         if cfg.diarization.enabled and all_segments and not any(
             str(seg.get("speaker", "")).strip() for seg in all_segments
         ):
+            hf_token_set = bool(cfg.diarization.hf_token)
             warnings.append(
                 "Speaker labels were not attached to transcript segments. "
-                "Check diarization configuration and the Hugging Face token."
+                + (
+                    "The Hugging Face token (WHISPER_HF_TOKEN) is NOT set — "
+                    "diarization requires a valid token. "
+                    "Get one at https://huggingface.co/settings/tokens and "
+                    "accept model terms at https://huggingface.co/pyannote/speaker-diarization-3.1"
+                    if not hf_token_set
+                    else "The HF token is set but diarization still failed. "
+                    "Check the worker logs for errors. Common causes: "
+                    "(1) Token has not accepted pyannote model terms, "
+                    "(2) pyannote.audio version incompatible with torch, "
+                    "(3) Insufficient GPU memory."
+                )
             )
 
         if not _has_transcript_content(final_text, all_words, all_segments):
