@@ -19,6 +19,7 @@ from loguru import logger
 
 from app.config import get_config
 from app.queue import get_job_state, set_job_failed, set_job_result, update_job
+from app.result_formatter import build_formatted_transcript
 from app.transcriber.align import align_segments
 from app.transcriber.chunker import load_audio, prepare_chunks
 from app.transcriber.diarization import assign_speakers, diarize
@@ -242,6 +243,7 @@ def process_job(job_id: str) -> None:
         update_job(job_id, progress=95)
 
         final_text = _build_text(all_segments, all_text_parts)
+        formatted_text = build_formatted_transcript(all_segments, final_text)
         all_words = _flatten_words(all_segments)
         warnings: List[str] = []
 
@@ -253,6 +255,13 @@ def process_job(job_id: str) -> None:
             warnings.append("Alignment was skipped because translation output does not match source audio.")
         if final_text and not all_words:
             warnings.append("Transcript text was produced without word-level timestamps.")
+        if cfg.diarization.enabled and all_segments and not any(
+            str(seg.get("speaker", "")).strip() for seg in all_segments
+        ):
+            warnings.append(
+                "Speaker labels were not attached to transcript segments. "
+                "Check diarization configuration and the Hugging Face token."
+            )
 
         if not _has_transcript_content(final_text, all_words, all_segments):
             message = "No speech was detected in the audio after transcription."
@@ -262,6 +271,7 @@ def process_job(job_id: str) -> None:
 
         result: Dict[str, Any] = {
             "text": final_text,
+            "formatted_text": formatted_text,
             "segments": all_segments,
             "words": all_words,
             "speakers": speaker_turns,
@@ -274,6 +284,10 @@ def process_job(job_id: str) -> None:
                 "chunks_with_content": non_empty_chunk_count,
                 "chunks_failed": len(failed_chunks),
                 "segment_count": len(all_segments),
+                "speaker_turn_count": len(speaker_turns),
+                "speaker_count": len(
+                    {str(seg.get("speaker", "")).strip() for seg in all_segments if seg.get("speaker")}
+                ),
                 "word_count": len(all_words),
             },
         }

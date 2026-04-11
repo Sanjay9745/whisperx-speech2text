@@ -154,7 +154,7 @@ async function fetchResult(jobId) {
     console.log(`  speakers : ${[...spkSet].join(', ')}`);
   }
   console.log('\n  Full text:');
-  console.log(`  ${result.text ?? '(empty)'}`);
+  console.log(`  ${result.formatted_text ?? result.text ?? '(empty)'}`);
   console.log('============================================================\n');
   return result;
 }

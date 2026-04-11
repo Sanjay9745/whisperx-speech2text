@@ -228,7 +228,7 @@ function printResult(result) {
     console.log(`  speakers : ${col(C.cyan, [...spkSet].join(', ') || '—')}`);
   }
   console.log(`\n  ${col(C.bold, 'Full transcript:')}`);
-  const text = (result.text ?? '').trim();
+  const text = (result.formatted_text ?? result.text ?? '').trim();
   console.log(`  ${col(C.grey, text || '(empty)')}`);
 
   if ((result.segments ?? []).length) {

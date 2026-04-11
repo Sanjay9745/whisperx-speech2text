@@ -4,16 +4,17 @@ Assigns speaker labels to transcription segments.
 
 Compatibility notes
 -------------------
-* pyannote.audio 4.x — use ``token=`` (not the deprecated ``use_auth_token=``).
-* torch 2.6+ — changed torch.load default to weights_only=True, which breaks
+* pyannote.audio 4.x - use ``token=`` (not the deprecated ``use_auth_token=``).
+* torch 2.6+ - changed torch.load default to weights_only=True, which breaks
   pyannote checkpoint loading (OmegaConf objects not in safe allowlist).
   We patch torch.load before importing pyannote so it defaults to False.
-* speechbrain (pulled in by pyannote) — torchaudio.list_audio_backends()
+* speechbrain (pulled in by pyannote) - torchaudio.list_audio_backends()
   was removed in torchaudio 2.9+; see app/transcriber/diarization.py patch.
 """
 
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, List, Optional
 
 import torch
@@ -22,6 +23,7 @@ from loguru import logger
 from app.config import get_config
 
 _pipeline: Optional[Any] = None
+_SPEAKER_LABEL_PATTERN = re.compile(r"speaker[_\s-]*(\d+)$", re.IGNORECASE)
 
 
 def _apply_torch_load_patch() -> None:
@@ -37,6 +39,7 @@ def _apply_torch_load_patch() -> None:
     """
     try:
         from packaging.version import Version
+
         if Version(torch.__version__.split("+")[0]) >= Version("2.6.0"):
             _orig = torch.load
 
@@ -46,8 +49,8 @@ def _apply_torch_load_patch() -> None:
 
             torch.load = _patched_load  # type: ignore[method-assign]
             logger.debug("torch.load weights_only patch applied (torch>=2.6)")
-    except Exception as e:
-        logger.debug(f"torch.load patch skipped: {e}")
+    except Exception as exc:
+        logger.debug(f"torch.load patch skipped: {exc}")
 
 
 def _load_pipeline():
@@ -60,9 +63,7 @@ def _load_pipeline():
     if not cfg.diarization.enabled:
         return None
     if not cfg.diarization.hf_token:
-        logger.warning(
-            "Diarization enabled but hf_token is empty — skipping diarization"
-        )
+        logger.warning("Diarization enabled but hf_token is empty - skipping diarization")
         return None
 
     try:
@@ -77,10 +78,10 @@ def _load_pipeline():
             else torch.device("cpu")
         )
 
-        logger.info("Loading pyannote diarization pipeline …")
+        logger.info("Loading pyannote diarization pipeline ...")
         _pipeline = Pipeline.from_pretrained(
             "pyannote/speaker-diarization-3.1",
-            token=cfg.diarization.hf_token,   # pyannote 4.x uses 'token', not 'use_auth_token'
+            token=cfg.diarization.hf_token,  # pyannote 4.x uses 'token'
         )
         _pipeline = _pipeline.to(device)
         logger.info("Diarization pipeline loaded")
@@ -100,12 +101,12 @@ def diarize(audio_path: str) -> List[Dict[str, Any]]:
         return []
 
     try:
-        logger.info(f"Running diarization on {audio_path} …")
+        logger.info(f"Running diarization on {audio_path} ...")
         diarization_result = pipeline(audio_path)
 
-        turns: List[Dict[str, Any]] = []
+        raw_turns: List[Dict[str, Any]] = []
         for turn, _, speaker in diarization_result.itertracks(yield_label=True):
-            turns.append(
+            raw_turns.append(
                 {
                     "start": round(turn.start, 3),
                     "end": round(turn.end, 3),
@@ -113,6 +114,7 @@ def diarize(audio_path: str) -> List[Dict[str, Any]]:
                 }
             )
 
+        turns = _normalize_turn_speakers(raw_turns)
         logger.info(f"Diarization found {len(set(t['speaker'] for t in turns))} speakers")
         return turns
 
@@ -132,22 +134,110 @@ def assign_speakers(
     if not speaker_turns:
         return segments
 
-    def _find_speaker(start: float, end: float) -> str:
+    turns = sorted(
+        speaker_turns,
+        key=lambda turn: (_safe_time(turn.get("start")), _safe_time(turn.get("end"))),
+    )
+
+    def _find_speaker(start: Any, end: Any) -> Dict[str, Any]:
+        segment_start = _safe_time(start)
+        segment_end = _safe_time(end, segment_start)
+        if segment_end < segment_start:
+            segment_end = segment_start
+
+        midpoint = segment_start + ((segment_end - segment_start) / 2.0)
         best_overlap = 0.0
-        best_speaker = "UNKNOWN"
-        for turn in speaker_turns:
-            overlap_start = max(start, turn["start"])
-            overlap_end = min(end, turn["end"])
-            overlap = max(0, overlap_end - overlap_start)
+        best_turn: Optional[Dict[str, Any]] = None
+        nearest_gap = float("inf")
+        nearest_turn: Optional[Dict[str, Any]] = None
+
+        for turn in turns:
+            turn_start = _safe_time(turn.get("start"))
+            turn_end = _safe_time(turn.get("end"), turn_start)
+            overlap_start = max(segment_start, turn_start)
+            overlap_end = min(segment_end, turn_end)
+            overlap = max(0.0, overlap_end - overlap_start)
+
             if overlap > best_overlap:
                 best_overlap = overlap
-                best_speaker = turn["speaker"]
-        return best_speaker
+                best_turn = turn
+
+            if turn_start <= midpoint <= turn_end:
+                nearest_gap = 0.0
+                nearest_turn = turn
+
+            if overlap == 0.0:
+                gap = min(abs(segment_start - turn_end), abs(segment_end - turn_start))
+                if gap < nearest_gap:
+                    nearest_gap = gap
+                    nearest_turn = turn
+
+        return best_turn or nearest_turn or {"speaker": "UNKNOWN"}
 
     for seg in segments:
-        seg["speaker"] = _find_speaker(seg["start"], seg["end"])
-        # Also tag words if present
-        for w in seg.get("words", []):
-            w["speaker"] = _find_speaker(w.get("start", seg["start"]), w.get("end", seg["end"]))
+        matched_turn = _find_speaker(seg.get("start", 0.0), seg.get("end", 0.0))
+        seg["speaker"] = matched_turn.get("speaker", "UNKNOWN")
+        speaker_id = str(matched_turn.get("speaker_id", "")).strip()
+        if speaker_id:
+            seg["speaker_id"] = speaker_id
+
+        for word in seg.get("words", []):
+            matched_word_turn = _find_speaker(
+                word.get("start", seg.get("start", 0.0)),
+                word.get("end", seg.get("end", 0.0)),
+            )
+            word["speaker"] = matched_word_turn.get("speaker", seg["speaker"])
+            word_speaker_id = str(matched_word_turn.get("speaker_id", "")).strip()
+            if word_speaker_id:
+                word["speaker_id"] = word_speaker_id
 
     return segments
+
+
+def _safe_time(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _display_speaker_name(raw_label: Any, fallback_index: int) -> str:
+    raw = str(raw_label or "").strip()
+    if not raw:
+        return f"Speaker {fallback_index}"
+
+    match = _SPEAKER_LABEL_PATTERN.search(raw)
+    if match:
+        return f"Speaker {int(match.group(1)) + 1}"
+
+    if raw.lower().startswith("speaker "):
+        return raw.title()
+
+    return raw
+
+
+def _normalize_turn_speakers(turns: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    label_map: Dict[str, str] = {}
+    next_index = 1
+    normalized: List[Dict[str, Any]] = []
+
+    for turn in sorted(
+        turns,
+        key=lambda item: (_safe_time(item.get("start")), _safe_time(item.get("end"))),
+    ):
+        raw_speaker = str(turn.get("speaker", "")).strip()
+        if raw_speaker not in label_map:
+            label_map[raw_speaker] = _display_speaker_name(raw_speaker, next_index)
+            next_index += 1
+
+        normalized_turn = {
+            "start": round(_safe_time(turn.get("start")), 3),
+            "end": round(_safe_time(turn.get("end")), 3),
+            "speaker": label_map[raw_speaker],
+        }
+        if raw_speaker:
+            normalized_turn["speaker_id"] = raw_speaker
+
+        normalized.append(normalized_turn)
+
+    return normalized

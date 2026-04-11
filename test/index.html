@@ -197,6 +197,15 @@
       </div>
     </div>
 
+    <div class="field">
+      <label>Task</label>
+      <div class="toggle-group" id="task-toggle">
+        <button class="active" onclick="setTask('transcribe')">📝 Transcribe</button>
+        <button onclick="setTask('translate')">🌐 Translate to English</button>
+      </div>
+      <div class="hint">Translate converts any language to English text</div>
+    </div>
+
     <div class="field" id="src-url-wrap">
       <label>Audio URL</label>
       <input id="audioUrl" type="url"
@@ -384,6 +393,15 @@ function setSrc(mode) {
   document.getElementById('src-file-wrap').classList.toggle('hidden', mode !== 'file');
 }
 
+// ── Task toggle ───────────────────────────────────────────────────────────────
+let _task = 'transcribe';
+function setTask(mode) {
+  _task = mode;
+  document.querySelectorAll('#task-toggle button').forEach((b, i) => {
+    b.classList.toggle('active', (i === 0 && mode === 'transcribe') || (i === 1 && mode === 'translate'));
+  });
+}
+
 // ============================================================================
 // Connection test
 // ============================================================================
@@ -441,6 +459,10 @@ async function submitJob() {
     try { JSON.parse(meta); form.append('metadata', meta); }
     catch { log('Metadata JSON is invalid — skipping', 'warn'); }
   }
+
+  // Task (transcribe or translate)
+  form.append('task', _task);
+  log(`Task: ${_task}`, 'info');
 
   document.getElementById('btn-submit').disabled = true;
   log(`POST ${apiUrl}/transcribe …`, 'info');
@@ -545,17 +567,19 @@ async function fetchResult(jobId) {
 // ============================================================================
 function renderResult(result, jobId) {
   document.getElementById('result-card').classList.remove('hidden');
+  const displayText = (result.formatted_text ?? result.text ?? '').trim();
 
   // Meta row
   document.getElementById('result-meta').innerHTML = `
     <div><b style="color:#a78bfa">${result.language ?? '?'}</b> <span style="color:#475569">language</span></div>
+    <div><b style="color:#a78bfa">${result.task ?? _task ?? 'transcribe'}</b> <span style="color:#475569">task</span></div>
     <div><b style="color:#a78bfa">${(result.segments ?? []).length}</b> <span style="color:#475569">segments</span></div>
     <div><b style="color:#a78bfa">${(result.words ?? []).length}</b> <span style="color:#475569">words</span></div>
     <div><b style="color:#a78bfa">${(result.speakers ?? []).length || '—'}</b> <span style="color:#475569">speaker turns</span></div>
   `;
 
   // Text
-  document.getElementById('result-text').textContent = result.text?.trim() || '(no text)';
+  document.getElementById('result-text').textContent = displayText || '(no text)';
 
   // Segments table
   const tbody = document.getElementById('segments-body');
@@ -618,7 +642,7 @@ function copyJobId() {
 
 function copyResult() {
   if (!_resultData) return;
-  navigator.clipboard.writeText(_resultData.text ?? '');
+  navigator.clipboard.writeText((_resultData.formatted_text ?? _resultData.text ?? '').trim());
   toast('Transcript copied!');
 }
 
