@@ -27,7 +27,9 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // ============================================================================
 const API_URL        = process.env.API_URL        || 'http://localhost:8000';
 const API_KEY        = process.env.API_KEY        || 'change-me-key-1';
-const AUDIO_URL      = process.env.AUDIO_URL      || 'https://download.samplelib.com/mp3/sample-3s.mp3';
+// NOTE: diarization requires ≥ ~10 s of audio with ≥ 2 speakers to show speaker turns.
+// sample-3s.mp3 is too short — use a longer multi-speaker sample as the default.
+const AUDIO_URL      = process.env.AUDIO_URL      || 'https://www2.cs.uic.edu/~i101/SoundFiles/StarWars60.wav';
 const AUDIO_FILE     = process.env.AUDIO_FILE     || null;   // e.g. './sample.mp3'
 const WEBHOOK_URL    = process.env.WEBHOOK_URL    || null;   // set to your webhook server URL
 const POLL_INTERVAL  = parseInt(process.env.POLL_INTERVAL  || '3000',  10);
