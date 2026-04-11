@@ -79,6 +79,18 @@ diarization:
   # Never commit a real token to version control — use the env var instead.
   hf_token: ""
 
+  # Pipeline mode — how diarization integrates with transcription:
+  #   "post" (default) — transcribe first, then diarize, then match speakers
+  #                       to words by timestamp overlap.  Works well when
+  #                       pyannote produces accurate speaker boundaries.
+  #   "pre"            — diarize FIRST, then transcribe each speaker turn
+  #                       separately.  Each Whisper chunk = one speaker's
+  #                       audio.  Much better for languages like Malayalam
+  #                       where pyannote detects speakers but post-matching
+  #                       fails because Whisper segments don't align with
+  #                       speaker boundaries.
+  mode: pre
+
   # Speaker count hints for pyannote (optional).
   # Set num_speakers when you know the exact speaker count for the recording.
   num_speakers:

@@ -22,6 +22,7 @@
    - [Step 11 · Webhook delivery](#step-11--webhook-delivery)
 8. [Output Format](#8-output-format)
 9. [Speaker Diarization — Deep Dive](#9-speaker-diarization--deep-dive)
+   - [Pipeline Modes: pre vs post](#pipeline-modes-pre-vs-post)
 10. [Deployment](#10-deployment)
 11. [Environment Variables](#11-environment-variables)
 12. [Running in Google Colab](#12-running-in-google-colab)
@@ -609,6 +610,72 @@ If they differ, it means pyannote detected a speaker but their turns were too sh
 
 pyannote checkpoints use OmegaConf objects that are not in PyTorch's safe-globals allowlist introduced in torch 2.6+. The code automatically patches `torch.load` to force `weights_only=False` before importing pyannote. The patch is guarded by a sentinel attribute to prevent double-wrapping.
 
+### Pipeline Modes: pre vs post
+
+The `diarization.mode` setting controls **when** diarization runs relative to transcription:
+
+#### `mode: post` (default) — Transcribe first, then diarize
+
+```
+Audio → VAD chunking → Whisper transcription → WhisperX alignment
+     → pyannote diarization → match speakers to words by overlap
+     → re-segment at speaker boundaries → output
+```
+
+- Whisper segments are based on **sentence boundaries** (content-aware).
+- After diarization, each Whisper word is matched to the closest speaker turn.
+- Works well when pyannote's speaker boundaries align with Whisper's segments.
+- **Problem**: if pyannote's speaker embeddings are weak for a language (e.g. Malayalam, Tamil), the speaker-to-word matching can collapse all segments to one speaker.
+
+#### `mode: pre` — Diarize first, then transcribe per speaker
+
+```
+Audio → pyannote diarization → merge short same-speaker turns
+     → slice audio per merged turn → Whisper transcription per turn
+     → WhisperX alignment → output (speaker pre-attached)
+```
+
+- Pyannote runs on the **full audio** and returns speaker turns.
+- Short consecutive same-speaker turns are merged (≤ 0.3s gap, min 1s, max = `chunk_duration_sec`).
+- Each merged turn is sliced from the audio and sent to Whisper independently.
+- Every segment and word inherits its speaker label **before** transcription — no post-matching needed.
+- If diarization returns no turns, the pipeline **falls back** to `post` mode automatically.
+- **Best for**: multilingual audio, low-resource languages, recordings where speakers have similar voice characteristics.
+
+#### How to switch modes
+
+```yaml
+# config.yaml
+diarization:
+  mode: pre   # or "post"
+```
+
+```bash
+# Environment variable (highest priority)
+export WHISPER_DIARIZATION_MODE=pre
+```
+
+#### Turn merging strategy (mode: pre)
+
+Before transcription, raw diarization turns are merged to create sensible Whisper chunks:
+
+| Parameter | Default | Effect |
+|---|---|---|
+| `gap_merge_sec` | 0.3s | Bridge same-speaker gaps ≤ this duration |
+| `min_turn_sec` | 1.0s | Absorb turns shorter than this into neighbours |
+| `max_turn_sec` | `chunk_duration_sec` (30s) | Never create merged chunks longer than this |
+
+Example: if pyannote returns 23 turns for 2 speakers, merging might reduce them to 8–12 chunks for Whisper, each containing only one speaker's audio.
+
+#### Output differences
+
+| Field | `mode: post` | `mode: pre` |
+|---|---|---|
+| `stats.pipeline_mode` | `"post"` | `"pre"` |
+| Speaker per segment | Assigned by timestamp overlap | Pre-attached from diarization turn |
+| Segment boundaries | Whisper content-based | Diarization speaker-based |
+| Re-segmentation | `resegment_by_speakers()` applied | Not needed (already per-speaker) |
+
 ---
 
 ## 10. Deployment
@@ -681,6 +748,7 @@ export WHISPER_API_KEYS=my-secret-key
 | `WHISPER_BEST_OF` | `5` | Best-of sampling count |
 | `WHISPER_HF_TOKEN` | — | **Required** for diarization — HuggingFace read token |
 | `WHISPER_DIARIZATION_ENABLED` | `true` | `1`/`true`/`yes` to enable |
+| `WHISPER_DIARIZATION_MODE` | `post` | `pre` = diarize first; `post` = transcribe first |
 | `WHISPER_DIARIZATION_MIN_SPEAKERS` | — | Minimum speaker hint for pyannote |
 | `WHISPER_DIARIZATION_MAX_SPEAKERS` | — | Maximum speaker hint for pyannote |
 | `WHISPER_WEBHOOK_ENABLED` | `true` | Enable webhook delivery |

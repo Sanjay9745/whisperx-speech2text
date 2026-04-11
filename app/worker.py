@@ -119,6 +119,309 @@ def _language_hints_from_metadata(metadata: Dict[str, Any]) -> List[str]:
     return hints
 
 
+# ---------------------------------------------------------------------------
+# Diarize-first pipeline helpers
+# ---------------------------------------------------------------------------
+
+def _merge_speaker_turns(
+    turns: List[Dict[str, Any]],
+    *,
+    min_turn_sec: float = 1.0,
+    max_turn_sec: float = 30.0,
+    gap_merge_sec: float = 0.3,
+) -> List[Dict[str, Any]]:
+    """
+    Merge consecutive same-speaker diarization turns into longer segments
+    suitable for Whisper transcription.
+
+    - Tiny same-speaker gaps (≤ *gap_merge_sec*) are bridged.
+    - Turns shorter than *min_turn_sec* are merged with their neighbour
+      if the speaker matches.
+    - No merged turn will exceed *max_turn_sec*.
+    """
+    if not turns:
+        return []
+
+    sorted_turns = sorted(
+        turns,
+        key=lambda t: (float(t.get("start", 0)), float(t.get("end", 0))),
+    )
+
+    merged: List[Dict[str, Any]] = []
+    current = {
+        "start": float(sorted_turns[0]["start"]),
+        "end": float(sorted_turns[0]["end"]),
+        "speaker": str(sorted_turns[0].get("speaker", "UNKNOWN")),
+        "speaker_id": str(sorted_turns[0].get("speaker_id", "")),
+    }
+
+    for turn in sorted_turns[1:]:
+        t_start = float(turn["start"])
+        t_end = float(turn["end"])
+        t_speaker = str(turn.get("speaker", "UNKNOWN"))
+        t_speaker_id = str(turn.get("speaker_id", ""))
+
+        gap = t_start - current["end"]
+        merged_duration = t_end - current["start"]
+
+        # Merge if same speaker, small gap, and result isn't too long
+        if (
+            t_speaker == current["speaker"]
+            and gap <= gap_merge_sec
+            and merged_duration <= max_turn_sec
+        ):
+            current["end"] = t_end
+            continue
+
+        # Also merge if current turn is too short and same speaker
+        current_duration = current["end"] - current["start"]
+        if (
+            current_duration < min_turn_sec
+            and t_speaker == current["speaker"]
+            and merged_duration <= max_turn_sec
+        ):
+            current["end"] = t_end
+            continue
+
+        merged.append(current)
+        current = {
+            "start": t_start,
+            "end": t_end,
+            "speaker": t_speaker,
+            "speaker_id": t_speaker_id,
+        }
+
+    merged.append(current)
+
+    # Second pass: absorb any remaining sub-min-turn into neighbours
+    final: List[Dict[str, Any]] = []
+    for turn in merged:
+        dur = turn["end"] - turn["start"]
+        if dur < min_turn_sec and final and final[-1]["speaker"] == turn["speaker"]:
+            final[-1]["end"] = turn["end"]
+        else:
+            final.append(turn)
+
+    return final
+
+
+def _process_diarize_first(
+    job_id: str,
+    file_path: str,
+    metadata: Dict[str, Any],
+    *,
+    source_language: str | None,
+    task: str,
+    initial_prompt: str | None,
+    language_hints: List[str],
+    diar_kwargs: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    Diarize-first pipeline: run pyannote on the full audio to find speaker
+    turns, then transcribe each speaker turn as an independent Whisper chunk.
+
+    This approach guarantees that **each output segment has exactly one
+    speaker** because the audio sent to Whisper already belongs to a single
+    speaker.  It solves the fundamental mismatch where Whisper's
+    sentence-based segmentation doesn't align with speaker boundaries.
+
+    Returns the same result dict shape as the standard pipeline.
+    """
+    cfg = get_config()
+
+    # ---- Step 1: Diarize the full audio ----
+    update_job(job_id, progress=5)
+    logger.info(f"[{job_id}] [PRE-DIARIZE] Running diarization first ...")
+    speaker_turns = diarize(file_path, **diar_kwargs)
+
+    if not speaker_turns:
+        logger.warning(
+            f"[{job_id}] [PRE-DIARIZE] Diarization returned no turns — "
+            "falling back to standard pipeline."
+        )
+        return {}  # empty dict signals caller to use standard pipeline
+
+    unique_speakers = {str(t.get("speaker", "")) for t in speaker_turns if t.get("speaker")}
+    logger.info(
+        f"[{job_id}] [PRE-DIARIZE] Diarization found {len(unique_speakers)} speaker(s), "
+        f"{len(speaker_turns)} raw turns"
+    )
+
+    # ---- Step 2: Merge short same-speaker turns ----
+    update_job(job_id, progress=15)
+    merged_turns = _merge_speaker_turns(
+        speaker_turns,
+        max_turn_sec=cfg.performance.chunk_duration_sec,
+    )
+    logger.info(
+        f"[{job_id}] [PRE-DIARIZE] Merged into {len(merged_turns)} transcription chunks"
+    )
+
+    # ---- Step 3: Load full audio ----
+    audio_np, sr = load_audio(file_path)
+
+    # ---- Step 4: Transcribe each speaker turn ----
+    update_job(job_id, progress=20)
+    all_segments: List[Dict[str, Any]] = []
+    all_text_parts: List[str] = []
+    detected_language = "en"
+    failed_chunks: List[Dict[str, Any]] = []
+    non_empty_chunk_count = 0
+
+    progress_base = 20
+    progress_range = 60
+    total_turns = len(merged_turns)
+
+    for turn_idx, turn in enumerate(merged_turns):
+        turn_start = float(turn["start"])
+        turn_end = float(turn["end"])
+        turn_speaker = str(turn.get("speaker", "UNKNOWN"))
+        turn_speaker_id = str(turn.get("speaker_id", ""))
+
+        # Slice audio for this turn
+        start_sample = int(turn_start * sr)
+        end_sample = int(turn_end * sr)
+        turn_audio = audio_np[start_sample:end_sample]
+
+        if turn_audio.size == 0:
+            continue
+
+        turn_duration = turn_end - turn_start
+        logger.debug(
+            f"[{job_id}] [PRE-DIARIZE] Turn {turn_idx + 1}/{total_turns}: "
+            f"{turn_speaker} [{turn_start:.1f}s–{turn_end:.1f}s] ({turn_duration:.1f}s)"
+        )
+
+        try:
+            result = transcribe_chunk(
+                turn_audio,
+                language=source_language,
+                task=task,
+                initial_prompt=initial_prompt,
+                language_hints=language_hints,
+            )
+
+            chunk_text = result.get("text", "").strip()
+            segment_list = result.get("segments", [])
+
+            # Offset timestamps back to absolute time and attach speaker
+            for seg in segment_list:
+                seg["start"] = round(float(seg["start"]) + turn_start, 3)
+                seg["end"] = round(float(seg["end"]) + turn_start, 3)
+                seg["speaker"] = turn_speaker
+                if turn_speaker_id:
+                    seg["speaker_id"] = turn_speaker_id
+                for word in seg.get("words", []):
+                    w_start = word.get("start")
+                    w_end = word.get("end")
+                    if w_start is not None:
+                        word["start"] = round(float(w_start) + turn_start, 3)
+                    if w_end is not None:
+                        word["end"] = round(float(w_end) + turn_start, 3)
+                    word["speaker"] = turn_speaker
+                    if turn_speaker_id:
+                        word["speaker_id"] = turn_speaker_id
+
+            if segment_list:
+                all_segments.extend(segment_list)
+            if chunk_text:
+                all_text_parts.append(chunk_text)
+                non_empty_chunk_count += 1
+
+            if result.get("language") and result["language"] != "unknown":
+                detected_language = result["language"]
+
+        except Exception as turn_err:
+            logger.error(
+                f"[{job_id}] [PRE-DIARIZE] Turn {turn_idx + 1} failed: {turn_err}"
+            )
+            failed_chunks.append({"index": turn_idx, "error": str(turn_err)})
+
+        pct = progress_base + int(progress_range * (turn_idx + 1) / total_turns)
+        update_job(job_id, progress=pct)
+
+    # ---- Step 5: Optional alignment ----
+    update_job(job_id, progress=82)
+    alignment_skipped_reason: str = ""
+    if task == "translate":
+        alignment_skipped_reason = "translate"
+    else:
+        try:
+            all_segments = align_segments(audio_np, all_segments, detected_language)
+            # Re-stamp speaker labels after alignment (alignment may rebuild words)
+            _restamp_speakers_from_segments(all_segments)
+        except Exception as align_err:
+            logger.warning(f"[{job_id}] Alignment skipped: {align_err}")
+            alignment_skipped_reason = str(align_err)
+
+    # ---- Step 6: Re-number segment IDs ----
+    for idx, seg in enumerate(all_segments, 1):
+        seg["id"] = idx
+
+    update_job(job_id, progress=90)
+
+    # ---- Build warnings ----
+    warnings: List[str] = []
+    if failed_chunks:
+        warnings.append(
+            f"{len(failed_chunks)} speaker turn(s) failed during transcription."
+        )
+    if alignment_skipped_reason == "translate":
+        warnings.append(
+            "Alignment was skipped: translate mode produces English text that does not "
+            "match source-language audio timestamps."
+        )
+    elif alignment_skipped_reason:
+        warnings.append(f"Word-level alignment skipped: {alignment_skipped_reason}")
+
+    final_text = _build_text(all_segments, all_text_parts)
+    formatted_text = build_formatted_transcript(all_segments, final_text)
+    all_words = _flatten_words(all_segments)
+
+    if final_text and not all_words:
+        warnings.append("Transcript text was produced without word-level timestamps.")
+
+    return {
+        "text": final_text,
+        "formatted_text": formatted_text,
+        "segments": all_segments,
+        "words": all_words,
+        "speakers": speaker_turns,  # original raw turns
+        "language": detected_language,
+        "task": task,
+        "metadata": metadata,
+        "warnings": warnings,
+        "stats": {
+            "chunks_total": total_turns,
+            "chunks_with_content": non_empty_chunk_count,
+            "chunks_failed": len(failed_chunks),
+            "segment_count": len(all_segments),
+            "speaker_turn_count": len(speaker_turns),
+            "speaker_count": len(unique_speakers),
+            "speakers_in_segments": len(
+                {str(seg.get("speaker", "")).strip() for seg in all_segments if seg.get("speaker")}
+            ),
+            "word_count": len(all_words),
+            "pipeline_mode": "pre",
+        },
+    }
+
+
+def _restamp_speakers_from_segments(segments: List[Dict[str, Any]]) -> None:
+    """
+    After WhisperX alignment, words may have been rebuilt without speaker
+    labels.  Copy the segment-level speaker down to any un-labeled words.
+    """
+    for seg in segments:
+        speaker = seg.get("speaker", "")
+        speaker_id = seg.get("speaker_id", "")
+        for word in seg.get("words", []):
+            if not word.get("speaker"):
+                word["speaker"] = speaker
+            if not word.get("speaker_id") and speaker_id:
+                word["speaker_id"] = speaker_id
+
+
 def process_job(job_id: str) -> None:
     """Top-level handler invoked by RQ for each queued job."""
     logger.info(f"[{job_id}] Starting job")
@@ -142,6 +445,69 @@ def process_job(job_id: str) -> None:
         initial_prompt = str(metadata.get("initial_prompt", "")).strip() or None
         language_hints = _language_hints_from_metadata(metadata)
 
+        # ---- Diarize-first mode ("pre") ----
+        if cfg.diarization.enabled and cfg.diarization.mode == "pre":
+            logger.info(f"[{job_id}] Using diarize-first pipeline (mode=pre)")
+
+            # Resolve speaker-count hints
+            diar_num = metadata.get("num_speakers") or cfg.diarization.num_speakers
+            diar_min = metadata.get("min_speakers") or cfg.diarization.min_speakers
+            diar_max = metadata.get("max_speakers") or cfg.diarization.max_speakers
+            diar_kwargs: Dict[str, Any] = {}
+            if diar_num:
+                diar_kwargs["num_speakers"] = int(diar_num)
+            if diar_min and not diar_kwargs.get("num_speakers"):
+                diar_kwargs["min_speakers"] = int(diar_min)
+            if diar_max and not diar_kwargs.get("num_speakers"):
+                diar_kwargs["max_speakers"] = int(diar_max)
+
+            pre_result = _process_diarize_first(
+                job_id,
+                file_path,
+                metadata,
+                source_language=source_language,
+                task=task,
+                initial_prompt=initial_prompt,
+                language_hints=language_hints,
+                diar_kwargs=diar_kwargs,
+            )
+
+            if pre_result:
+                # diarize-first succeeded — finish up
+                if not _has_transcript_content(
+                    pre_result.get("text", ""),
+                    pre_result.get("words", []),
+                    pre_result.get("segments", []),
+                ):
+                    message = "No speech was detected in the audio after transcription."
+                    if cfg.performance.use_vad:
+                        message += " Try disabling VAD or using clearer audio input."
+                    raise ValueError(message)
+
+                set_job_result(job_id, pre_result)
+                logger.info(f"[{job_id}] Completed successfully (diarize-first)")
+                _save_output(job_id, pre_result)
+
+                if webhook_url and cfg.webhook.enabled:
+                    logger.info(f"[{job_id}] Sending webhook to {webhook_url}")
+                    deliver_webhook_sync(
+                        webhook_url,
+                        {
+                            "job_id": job_id,
+                            "status": "completed",
+                            "result": pre_result,
+                            "metadata": metadata,
+                        },
+                    )
+                return  # ← skip standard pipeline
+
+            # Empty dict returned → diarization found no turns, fall through
+            logger.info(
+                f"[{job_id}] Diarize-first returned no turns — "
+                "falling back to standard pipeline"
+            )
+
+        # ---- Standard pipeline (mode=post or fallback) ----
         update_job(job_id, progress=5)
         logger.info(f"[{job_id}] Chunking audio: {file_path}")
         chunks = prepare_chunks(file_path)
@@ -421,6 +787,7 @@ def process_job(job_id: str) -> None:
                     {str(seg.get("speaker", "")).strip() for seg in all_segments if seg.get("speaker")}
                 ),
                 "word_count": len(all_words),
+                "pipeline_mode": "post",
             },
         }
 

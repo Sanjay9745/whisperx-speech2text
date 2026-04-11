@@ -90,6 +90,11 @@ class DiarizationConfig:
     def __init__(self, data: dict):
         self.enabled: bool = bool(data.get("enabled", True))
         self.hf_token: str = data.get("hf_token", "")
+        # Pipeline mode: "post" = current (transcribe then diarize),
+        #                "pre"  = diarize first then transcribe per speaker turn
+        self.mode: str = str(data.get("mode", "post")).strip().lower()
+        if self.mode not in ("pre", "post"):
+            self.mode = "post"
         # Optional speaker count hints passed to pyannote pipeline
         self.num_speakers: Optional[int] = _opt_int(data.get("num_speakers"))
         self.min_speakers: Optional[int] = _opt_int(data.get("min_speakers"))
@@ -178,6 +183,10 @@ class AppConfig:
             self.diarization.hf_token = v
         if v := os.getenv("WHISPER_DIARIZATION_ENABLED"):
             self.diarization.enabled = _bool_env(v)
+        if v := os.getenv("WHISPER_DIARIZATION_MODE"):
+            mode = v.strip().lower()
+            if mode in ("pre", "post"):
+                self.diarization.mode = mode
         if v := os.getenv("WHISPER_DIARIZATION_NUM_SPEAKERS"):
             self.diarization.num_speakers = _opt_int(v)
         if v := os.getenv("WHISPER_DIARIZATION_MIN_SPEAKERS"):
