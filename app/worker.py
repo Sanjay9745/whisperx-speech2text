@@ -344,6 +344,9 @@ def process_job(job_id: str) -> None:
                 "segment_count": len(all_segments),
                 "speaker_turn_count": len(speaker_turns),
                 "speaker_count": len(
+                    {str(t.get("speaker", "")).strip() for t in speaker_turns if t.get("speaker")}
+                ),
+                "speakers_in_segments": len(
                     {str(seg.get("speaker", "")).strip() for seg in all_segments if seg.get("speaker")}
                 ),
                 "word_count": len(all_words),

@@ -15,6 +15,7 @@ Compatibility notes
 from __future__ import annotations
 
 import re
+from collections import Counter
 from typing import Any, Dict, List, Optional
 
 import torch
@@ -235,8 +236,23 @@ def assign_speakers(
     speaker_turns: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
     """
-    Assign a speaker label to each segment based on overlap with
-    diarization turns.
+    Assign a speaker label to each segment (and each word) based on
+    overlap with diarization turns.
+
+    Strategy
+    --------
+    1. Build a sorted list of diarization turns.
+    2. For every word in a segment, find the turn with the greatest overlap.
+       - If word timestamps are *collapsed* (all identical — common in
+         ``translate`` mode where alignment is skipped), distribute the
+         words evenly across the segment's time range so each word gets a
+         distinct virtual timestamp.
+    3. Set the **segment-level** speaker to the speaker that owns the
+       majority of words in that segment.  This is more accurate than
+       picking the turn with the longest overlap against the entire
+       segment range, because a shorter minority-speaker turn that
+       dominates the first or second half of the segment will be
+       correctly captured.
     """
     if not speaker_turns:
         return segments
@@ -246,13 +262,8 @@ def assign_speakers(
         key=lambda turn: (_safe_time(turn.get("start")), _safe_time(turn.get("end"))),
     )
 
-    def _find_speaker(start: Any, end: Any) -> Dict[str, Any]:
-        segment_start = _safe_time(start)
-        segment_end = _safe_time(end, segment_start)
-        if segment_end < segment_start:
-            segment_end = segment_start
-
-        midpoint = segment_start + ((segment_end - segment_start) / 2.0)
+    def _find_speaker_at(point_start: float, point_end: float) -> Dict[str, Any]:
+        """Find the best speaker turn for a given time range."""
         best_overlap = 0.0
         best_turn: Optional[Dict[str, Any]] = None
         nearest_gap = float("inf")
@@ -261,20 +272,22 @@ def assign_speakers(
         for turn in turns:
             turn_start = _safe_time(turn.get("start"))
             turn_end = _safe_time(turn.get("end"), turn_start)
-            overlap_start = max(segment_start, turn_start)
-            overlap_end = min(segment_end, turn_end)
+            overlap_start = max(point_start, turn_start)
+            overlap_end = min(point_end, turn_end)
             overlap = max(0.0, overlap_end - overlap_start)
 
             if overlap > best_overlap:
                 best_overlap = overlap
                 best_turn = turn
 
-            if turn_start <= midpoint <= turn_end:
-                nearest_gap = 0.0
-                nearest_turn = turn
+            # For zero-length points, check containment
+            if point_start == point_end and turn_start <= point_start <= turn_end:
+                if best_overlap == 0.0:
+                    best_overlap = 0.001  # tiny but nonzero
+                    best_turn = turn
 
             if overlap == 0.0:
-                gap = min(abs(segment_start - turn_end), abs(segment_end - turn_start))
+                gap = min(abs(point_start - turn_end), abs(point_end - turn_start))
                 if gap < nearest_gap:
                     nearest_gap = gap
                     nearest_turn = turn
@@ -282,21 +295,68 @@ def assign_speakers(
         return best_turn or nearest_turn or {"speaker": "UNKNOWN"}
 
     for seg in segments:
-        matched_turn = _find_speaker(seg.get("start", 0.0), seg.get("end", 0.0))
-        seg["speaker"] = matched_turn.get("speaker", "UNKNOWN")
-        speaker_id = str(matched_turn.get("speaker_id", "")).strip()
-        if speaker_id:
-            seg["speaker_id"] = speaker_id
+        seg_start = _safe_time(seg.get("start", 0.0))
+        seg_end = _safe_time(seg.get("end", seg_start))
+        words = seg.get("words", [])
 
-        for word in seg.get("words", []):
-            matched_word_turn = _find_speaker(
-                word.get("start", seg.get("start", 0.0)),
-                word.get("end", seg.get("end", 0.0)),
+        if words:
+            # Detect whether word timestamps are collapsed (all identical)
+            word_starts = [_safe_time(w.get("start", seg_start)) for w in words]
+            word_ends = [_safe_time(w.get("end", seg_end)) for w in words]
+            timestamps_collapsed = (
+                len(set(word_starts)) <= 2 and len(words) > 3
             )
-            word["speaker"] = matched_word_turn.get("speaker", seg["speaker"])
-            word_speaker_id = str(matched_word_turn.get("speaker_id", "")).strip()
-            if word_speaker_id:
-                word["speaker_id"] = word_speaker_id
+
+            if timestamps_collapsed and len(words) > 1:
+                # Distribute words evenly across the segment's time range
+                seg_dur = max(seg_end - seg_start, 0.001)
+                step = seg_dur / len(words)
+                for i, word in enumerate(words):
+                    virt_start = seg_start + i * step
+                    virt_end = seg_start + (i + 1) * step
+                    matched = _find_speaker_at(virt_start, virt_end)
+                    word["speaker"] = matched.get("speaker", "UNKNOWN")
+                    spk_id = str(matched.get("speaker_id", "")).strip()
+                    if spk_id:
+                        word["speaker_id"] = spk_id
+            else:
+                # Normal path — word timestamps are usable
+                for word in words:
+                    w_start = _safe_time(word.get("start", seg_start))
+                    w_end = _safe_time(word.get("end", w_start))
+                    if w_end < w_start:
+                        w_end = w_start
+                    matched = _find_speaker_at(w_start, w_end)
+                    word["speaker"] = matched.get("speaker", "UNKNOWN")
+                    spk_id = str(matched.get("speaker_id", "")).strip()
+                    if spk_id:
+                        word["speaker_id"] = spk_id
+
+            # Determine segment speaker from word majority
+            speaker_counts = Counter(
+                str(w.get("speaker", "UNKNOWN")) for w in words
+            )
+            majority_speaker = speaker_counts.most_common(1)[0][0]
+            seg["speaker"] = majority_speaker
+            # Find matching speaker_id
+            for w in words:
+                if w.get("speaker") == majority_speaker and w.get("speaker_id"):
+                    seg["speaker_id"] = w["speaker_id"]
+                    break
+        else:
+            # No words — fall back to segment-level overlap
+            matched = _find_speaker_at(seg_start, seg_end)
+            seg["speaker"] = matched.get("speaker", "UNKNOWN")
+            spk_id = str(matched.get("speaker_id", "")).strip()
+            if spk_id:
+                seg["speaker_id"] = spk_id
+
+    # Log summary
+    seg_speakers = Counter(str(s.get("speaker", "")) for s in segments)
+    logger.info(
+        f"Speaker assignment complete: {len(segments)} segments → "
+        f"{dict(seg_speakers)}"
+    )
 
     return segments
 
