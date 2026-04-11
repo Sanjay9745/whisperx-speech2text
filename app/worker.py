@@ -43,17 +43,7 @@ def _warm_up() -> None:
 
         # Log diarization config status for debugging
         if cfg.diarization.enabled:
-            hf_token = cfg.diarization.hf_token
-            if hf_token:
-                logger.info(
-                    f"Diarization is ENABLED (HF token: {hf_token[:8]}…)"
-                )
-            else:
-                logger.warning(
-                    "Diarization is ENABLED but WHISPER_HF_TOKEN is NOT SET. "
-                    "Speaker labels will not be generated. "
-                    "Set the WHISPER_HF_TOKEN environment variable."
-                )
+            logger.info("Diarization is ENABLED (using NVIDIA NeMo)")
         else:
             logger.info("Diarization is DISABLED in config")
 
@@ -217,8 +207,9 @@ def _process_diarize_first(
     diar_kwargs: Dict[str, Any],
 ) -> Dict[str, Any]:
     """
-    Diarize-first pipeline: run pyannote on the full audio to find speaker
-    turns, then transcribe each speaker turn as an independent Whisper chunk.
+    Diarize-first pipeline: run NeMo diarization on the full audio to find
+    speaker turns, then transcribe each speaker turn as an independent
+    Whisper chunk.
 
     This approach guarantees that **each output segment has exactly one
     speaker** because the audio sent to Whisper already belongs to a single
@@ -745,17 +736,11 @@ def process_job(job_id: str) -> None:
         if cfg.diarization.enabled and all_segments and not any(
             str(seg.get("speaker", "")).strip() for seg in all_segments
         ):
-            hf_token_set = bool(cfg.diarization.hf_token)
             warnings.append(
                 "Speaker labels were not attached to transcript segments. "
-                + (
-                    "WHISPER_HF_TOKEN is not set — diarization requires a valid HF token. "
-                    "Get one at https://huggingface.co/settings/tokens"
-                    if not hf_token_set
-                    else "The HF token is set but no speaker turns were detected. "
-                    "This is normal for very short audio (< 10 s) or single-speaker recordings. "
-                    "For multi-speaker audio, check the worker log for pipeline errors."
-                )
+                "No speaker turns were detected by the NeMo diarizer. "
+                "This is normal for very short audio (< 10 s) or single-speaker recordings. "
+                "For multi-speaker audio, check the worker log for pipeline errors."
             )
 
         if not _has_transcript_content(final_text, all_words, all_segments):

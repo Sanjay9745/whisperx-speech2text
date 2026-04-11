@@ -28,8 +28,11 @@ COPY requirements.txt .
 # Install PyTorch with CUDA 12.4 support first
 RUN pip install torch==2.5.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu124
 
-# Install remaining requirements (skip torch/torchaudio, installed above with CUDA wheels)
-RUN grep -Ev "^(torch|torchaudio)([<>=].*)?$" requirements.txt > /tmp/reqs_no_torch.txt && \
+# Install NeMo toolkit (speaker diarization) — must come after torch
+RUN pip install 'nemo_toolkit[asr]>=2.0.0'
+
+# Install remaining requirements (skip torch/torchaudio/nemo, installed above)
+RUN grep -Ev "^(torch|torchaudio|nemo)([<>=_\[].*)?$" requirements.txt > /tmp/reqs_no_torch.txt && \
     pip install -r /tmp/reqs_no_torch.txt && \
     rm /tmp/reqs_no_torch.txt
 

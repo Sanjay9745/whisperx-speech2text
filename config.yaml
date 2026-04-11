@@ -63,35 +63,35 @@ accuracy:
   best_of: 5
 
 # ---------------------------------------------------------------------------
-# Speaker diarization (pyannote.audio >= 4.x)
-# Env overrides: WHISPER_DIARIZATION_ENABLED | WHISPER_HF_TOKEN
+# Speaker diarization (NVIDIA NeMo — NeuralDiarizer / MSDD)
+# Env overrides: WHISPER_DIARIZATION_ENABLED
 #                WHISPER_DIARIZATION_NUM_SPEAKERS
 #                WHISPER_DIARIZATION_MIN_SPEAKERS | WHISPER_DIARIZATION_MAX_SPEAKERS
 #
-# !! IMPORTANT: You MUST set WHISPER_HF_TOKEN (or fill hf_token below)
-#    with a Hugging Face token that has accepted the pyannote model terms:
-#    https://huggingface.co/pyannote/speaker-diarization-3.1
-#    https://huggingface.co/pyannote/segmentation-3.0
+# NeMo downloads models from NVIDIA NGC automatically — no HuggingFace
+# token is required.  Models used:
+#   - vad_multilingual_marblenet  (Voice Activity Detection)
+#   - titanet_large               (Speaker Embeddings)
+#   - diar_msdd_telephonic        (Multi-Scale Diarization Decoder)
+#
+# First run will download ~2 GB of model weights to ~/.cache/nemo.
+# Set NEMO_CACHE_DIR to change the cache directory.
 # ---------------------------------------------------------------------------
 diarization:
   enabled: true
-  # Paste your HF token here OR export WHISPER_HF_TOKEN=<token> in the shell.
-  # Never commit a real token to version control — use the env var instead.
-  hf_token: ""
 
   # Pipeline mode — how diarization integrates with transcription:
   #   "post" (default) — transcribe first, then diarize, then match speakers
   #                       to words by timestamp overlap.  Works well when
-  #                       pyannote produces accurate speaker boundaries.
+  #                       diarization produces accurate speaker boundaries.
   #   "pre"            — diarize FIRST, then transcribe each speaker turn
   #                       separately.  Each Whisper chunk = one speaker's
   #                       audio.  Much better for languages like Malayalam
-  #                       where pyannote detects speakers but post-matching
-  #                       fails because Whisper segments don't align with
-  #                       speaker boundaries.
+  #                       where post-matching fails because Whisper segments
+  #                       don't align with speaker boundaries.
   mode: pre
 
-  # Speaker count hints for pyannote (optional).
+  # Speaker count hints (optional).
   # Set num_speakers when you know the exact speaker count for the recording.
   num_speakers:
   # Set min_speakers to 2 for conversational audio to force detection of

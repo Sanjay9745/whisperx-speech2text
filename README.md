@@ -1,6 +1,6 @@
 # Speech-to-Text API
 
-Production-grade, GPU-optimized transcription system built on **faster-whisper**, **WhisperX**, **Silero-VAD**, and **pyannote.audio**.
+Production-grade, GPU-optimized transcription system built on **faster-whisper**, **WhisperX**, **Silero-VAD**, and **NVIDIA NeMo** (speaker diarization).
 
 ## Quick Start
 
@@ -9,8 +9,8 @@ Production-grade, GPU-optimized transcription system built on **faster-whisper**
 Edit `config.yaml`:
 
 - Set `security.api_keys` to your own secret keys.
-- Set `diarization.hf_token` to your HuggingFace token (required for speaker diarization).
 - Adjust `model.size`, `performance.batch_size`, etc. as needed.
+- Speaker diarization uses NVIDIA NeMo — no HuggingFace token required.
 
 ### 2. Launch (Docker)
 
@@ -93,7 +93,7 @@ Client → FastAPI (API) → Redis (RQ Queue)
 | `WHISPER_COMPUTE_TYPE`        | from config.yaml     | Override compute type           |
 | `WHISPER_BATCH_SIZE`          | from config.yaml     | Override batch size             |
 | `WHISPER_MAX_WORKERS`         | from config.yaml     | Override max workers            |
-| `WHISPER_HF_TOKEN`            | from config.yaml     | HuggingFace token               |
+| `WHISPER_HF_TOKEN`            | (optional)           | HuggingFace token (not needed for NeMo) |
 | `WHISPER_DIARIZATION_ENABLED` | from config.yaml     | Enable/disable diarization      |
 
 ## License

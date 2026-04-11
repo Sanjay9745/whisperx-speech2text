@@ -40,7 +40,7 @@ This is a **production-grade, GPU-accelerated speech-to-text API** that accepts 
 - Detects speech regions with **Silero-VAD** and skips silence
 - Transcribes with **faster-whisper** (supports 100+ languages, `transcribe` and `translate` modes)
 - Refines word-level timestamps with **WhisperX**
-- Assigns speaker labels using **pyannote.audio** diarization
+- Assigns speaker labels using **NVIDIA NeMo** diarization
 - Splits any mixed-speaker segment so each output segment has exactly one speaker
 - Delivers results via **webhook** or polling
 - Scales horizontally by adding more RQ workers
@@ -56,7 +56,7 @@ This is a **production-grade, GPU-accelerated speech-to-text API** that accepts 
 | VAD | Silero-VAD | Voice activity detection |
 | Transcription | faster-whisper | CTranslate2-optimized Whisper |
 | Alignment | WhisperX | Precise word-level timestamps |
-| Diarization | pyannote.audio 4.x | Speaker identification |
+| Diarization | NVIDIA NeMo (NeuralDiarizer) | Speaker identification |
 | Audio I/O | librosa, soundfile, pydub | Load / resample audio |
 | HTTP client | httpx | URL download, webhook delivery |
 | Logging | loguru | Structured logging |
@@ -82,8 +82,8 @@ speech2text/
 │       ├── chunker.py       # Load audio, VAD-guided chunking
 │       ├── whisper.py       # faster-whisper model + transcribe_chunk()
 │       ├── align.py         # WhisperX word alignment
-│       └── diarization.py   # pyannote pipeline, speaker assignment,
-│                            #   re-segmentation
+│       └── diarization.py   # NeMo NeuralDiarizer pipeline, speaker
+│                            #   assignment, re-segmentation
 ├── config.yaml              # All tuneable knobs (model, perf, security…)
 ├── requirements.txt         # Python dependencies
 ├── Dockerfile               # CUDA 12.4 / Python 3.11 image
@@ -126,7 +126,7 @@ speech2text/
                               │  ① VAD → chunks                       │
                               │  ② faster-whisper transcribe          │
                               │  ③ WhisperX word align                │
-                              │  ④ pyannote diarize                   │
+                              │  ④ NeMo diarize                      │
                               │  ⑤ resegment by speaker               │
                               │  ⑥ save JSON → outputs/               │
                               │  ⑦ webhook POST (optional)            │
@@ -184,7 +184,7 @@ accuracy:
 ```yaml
 diarization:
   enabled: true
-  hf_token: ""         # Hugging Face token (required for pyannote)
+  mode: pre            # "pre" or "post"
   min_speakers:        # optional hint — null or e.g. 2
   max_speakers:        # optional hint — null or e.g. 5
 ```
@@ -234,8 +234,8 @@ Submit audio for transcription. Returns a `job_id` immediately (HTTP 202).
 | `task` | string | no | `transcribe` (default) or `translate` (→ English) |
 | `initial_prompt` | string | no | Whisper context hint for first chunk |
 | `language_hints` | string | no | Comma-separated language codes, e.g. `ml,en` |
-| `min_speakers` | integer | no | Minimum expected speakers (hint for pyannote) |
-| `max_speakers` | integer | no | Maximum expected speakers (hint for pyannote) |
+| `min_speakers` | integer | no | Minimum expected speakers (hint for diarizer) |
+| `max_speakers` | integer | no | Maximum expected speakers (hint for diarizer) |
 
 **Response (202):**
 ```json
@@ -399,33 +399,34 @@ After transcription, **WhisperX** is used to refine word timestamps:
 
 `app/transcriber/diarization.py`
 
-Speaker diarization runs the **pyannote.audio** speaker-diarization-3.1 pipeline:
+Speaker diarization runs the **NVIDIA NeMo** NeuralDiarizer (MSDD) pipeline with TitaNet speaker embeddings and MarbleNet VAD:
 
-#### 8a. Audio pre-loading
+#### 8a. Audio conversion
 
-Instead of letting pyannote read the file directly (which can cause duration-mismatch errors on `.mp4`/`.mkv` container formats), the audio is pre-loaded with librosa into an in-memory dict:
+NeMo requires 16 kHz mono WAV input. The audio is automatically converted if needed using librosa. The converted file is cleaned up after diarization.
 
-```python
-{"waveform": Tensor(1, T), "sample_rate": 16000}
-```
+#### 8b. NeMo manifest
 
-This bypasses pyannote's internal ffmpeg/torchaudio file I/O entirely.
+NeMo diarizers expect a JSON-lines manifest file. This is created automatically for each audio file with fields like `audio_filepath`, `duration`, and optional `num_speakers`.
 
-#### 8b. Speaker count hints
+#### 8c. Speaker count hints
 
 The pipeline accepts optional hints that significantly improve accuracy:
 
 ```python
-pipeline(audio_input, min_speakers=2, max_speakers=5)
+# oracle mode — exact number of speakers known
+config.diarizer.clustering.parameters.oracle_num_speakers = True
+# or max speakers cap
+config.diarizer.clustering.parameters.max_num_speakers = 5
 ```
 
-These are resolved in priority order: **API param** → **metadata JSON** → **config.yaml** → **none** (pyannote decides automatically).
+These are resolved in priority order: **API param** → **metadata JSON** → **config.yaml** → **none** (NeMo decides automatically).
 
-#### 8c. Output normalisation
+#### 8d. Output normalisation
 
-Raw pyannote speaker labels (`SPEAKER_00`, `SPEAKER_01`, …) are mapped to human-readable `Speaker 1`, `Speaker 2`, … in chronological order of first appearance. The raw ID is preserved as `speaker_id`.
+Raw NeMo speaker labels (`speaker_0`, `speaker_1`, …) are mapped to human-readable `Speaker 1`, `Speaker 2`, … in chronological order of first appearance. The raw ID is preserved as `speaker_id`.
 
-#### 8d. Speaker assignment
+#### 8e. Speaker assignment
 
 `assign_speakers()` maps each **word** (not just each segment) to a speaker turn:
 
@@ -583,10 +584,12 @@ Example:
 
 ### Requirements
 
-1. A **Hugging Face account** with accepted terms for both models:
-   - https://huggingface.co/pyannote/speaker-diarization-3.1
-   - https://huggingface.co/pyannote/segmentation-3.0
-2. A **HF token** with `read` scope — set as `WHISPER_HF_TOKEN` or in `config.yaml`.
+1. **NVIDIA NeMo** toolkit installed: `pip install 'nemo_toolkit[asr]'`
+2. Models are downloaded automatically from **NVIDIA NGC** on first run (~2 GB):
+   - `vad_multilingual_marblenet` (Voice Activity Detection)
+   - `titanet_large` (Speaker Embeddings)
+   - `diar_msdd_telephonic` (Multi-Scale Diarization Decoder)
+3. No HuggingFace token is required.
 
 ### Controlling speaker count
 
@@ -604,11 +607,17 @@ Setting `min_speakers=2` is recommended for **conversational audio** (interviews
 `speaker_count` counts distinct speakers found by the diarization pipeline.
 `speakers_in_segments` counts distinct speakers actually present in the output segments.
 
-If they differ, it means pyannote detected a speaker but their turns were too short relative to Whisper's segments and were absorbed. Passing `min_speakers=N` forces pyannote to find more distinct turns.
+If they differ, it means the diarizer detected a speaker but their turns were too short relative to Whisper's segments and were absorbed. Passing `min_speakers=N` can help force detection of more distinct turns.
 
-### torch.load compatibility patch
+### NeMo models used
 
-pyannote checkpoints use OmegaConf objects that are not in PyTorch's safe-globals allowlist introduced in torch 2.6+. The code automatically patches `torch.load` to force `weights_only=False` before importing pyannote. The patch is guarded by a sentinel attribute to prevent double-wrapping.
+| Model | Purpose | Size |
+|---|---|---|
+| `vad_multilingual_marblenet` | Voice Activity Detection | ~50 MB |
+| `titanet_large` | Speaker Embedding extraction | ~100 MB |
+| `diar_msdd_telephonic` | Multi-Scale Diarization Decoder | ~200 MB |
+
+Models are cached in `~/.cache/nemo` (or set `NEMO_CACHE_DIR` to change).
 
 ### Pipeline Modes: pre vs post
 
@@ -618,24 +627,24 @@ The `diarization.mode` setting controls **when** diarization runs relative to tr
 
 ```
 Audio → VAD chunking → Whisper transcription → WhisperX alignment
-     → pyannote diarization → match speakers to words by overlap
+     → NeMo diarization → match speakers to words by overlap
      → re-segment at speaker boundaries → output
 ```
 
 - Whisper segments are based on **sentence boundaries** (content-aware).
 - After diarization, each Whisper word is matched to the closest speaker turn.
-- Works well when pyannote's speaker boundaries align with Whisper's segments.
-- **Problem**: if pyannote's speaker embeddings are weak for a language (e.g. Malayalam, Tamil), the speaker-to-word matching can collapse all segments to one speaker.
+- Works well when diarization speaker boundaries align with Whisper's segments.
+- **Problem**: if the diarizer's speaker embeddings are weak for a language (e.g. Malayalam, Tamil), the speaker-to-word matching can collapse all segments to one speaker.
 
 #### `mode: pre` — Diarize first, then transcribe per speaker
 
 ```
-Audio → pyannote diarization → merge short same-speaker turns
+Audio → NeMo diarization → merge short same-speaker turns
      → slice audio per merged turn → Whisper transcription per turn
      → WhisperX alignment → output (speaker pre-attached)
 ```
 
-- Pyannote runs on the **full audio** and returns speaker turns.
+- NeMo runs on the **full audio** and returns speaker turns.
 - Short consecutive same-speaker turns are merged (≤ 0.3s gap, min 1s, max = `chunk_duration_sec`).
 - Each merged turn is sliced from the audio and sent to Whisper independently.
 - Every segment and word inherits its speaker label **before** transcription — no post-matching needed.
@@ -665,7 +674,7 @@ Before transcription, raw diarization turns are merged to create sensible Whispe
 | `min_turn_sec` | 1.0s | Absorb turns shorter than this into neighbours |
 | `max_turn_sec` | `chunk_duration_sec` (30s) | Never create merged chunks longer than this |
 
-Example: if pyannote returns 23 turns for 2 speakers, merging might reduce them to 8–12 chunks for Whisper, each containing only one speaker's audio.
+Example: if NeMo returns 23 turns for 2 speakers, merging might reduce them to 8–12 chunks for Whisper, each containing only one speaker's audio.
 
 #### Output differences
 
@@ -684,7 +693,7 @@ Example: if pyannote returns 23 turns for 2 speakers, merging might reduce them 
 
 ```bash
 # 1. Copy and edit config
-cp config.yaml config.yaml   # edit: api_keys, hf_token (or use env vars)
+cp config.yaml config.yaml   # edit: api_keys (or use env vars)
 
 # 2. Build and start
 docker compose up --build -d
@@ -718,13 +727,12 @@ Never put real tokens in `config.yaml`. Use Docker env instead:
 ```bash
 # docker-compose.yml → worker / api environment section
 environment:
-  - WHISPER_HF_TOKEN=hf_xxxxxxxxxxxx
   - WHISPER_API_KEYS=my-secret-key
+  # WHISPER_HF_TOKEN is optional — NeMo diarization does not require it
 ```
 
 Or export them on the host before `docker compose up`:
 ```bash
-export WHISPER_HF_TOKEN=hf_xxxxxxxxxxxx
 export WHISPER_API_KEYS=my-secret-key
 ```
 
@@ -746,11 +754,11 @@ export WHISPER_API_KEYS=my-secret-key
 | `WHISPER_BEAM_SIZE` | `5` | Beam search width |
 | `WHISPER_TEMPERATURE` | `0.0` | Sampling temperature |
 | `WHISPER_BEST_OF` | `5` | Best-of sampling count |
-| `WHISPER_HF_TOKEN` | — | **Required** for diarization — HuggingFace read token |
+| `WHISPER_HF_TOKEN` | — | HuggingFace token (optional, not required for NeMo) |
 | `WHISPER_DIARIZATION_ENABLED` | `true` | `1`/`true`/`yes` to enable |
 | `WHISPER_DIARIZATION_MODE` | `post` | `pre` = diarize first; `post` = transcribe first |
-| `WHISPER_DIARIZATION_MIN_SPEAKERS` | — | Minimum speaker hint for pyannote |
-| `WHISPER_DIARIZATION_MAX_SPEAKERS` | — | Maximum speaker hint for pyannote |
+| `WHISPER_DIARIZATION_MIN_SPEAKERS` | — | Minimum speaker hint for NeMo diarizer |
+| `WHISPER_DIARIZATION_MAX_SPEAKERS` | — | Maximum speaker hint for NeMo diarizer |
 | `WHISPER_WEBHOOK_ENABLED` | `true` | Enable webhook delivery |
 | `WHISPER_WEBHOOK_TIMEOUT` | `15` | Webhook HTTP timeout in seconds |
 | `WHISPER_WEBHOOK_RETRY_COUNT` | `3` | Webhook retry attempts |
@@ -769,16 +777,14 @@ The notebook `speech2text_colab.ipynb` automates the entire Colab setup:
 1. Installs all Python dependencies in the correct order (torch first, then WhisperX with `--no-deps`).
 2. Clones or pulls the repo to `/content/speech2text`.
 3. Starts Redis in the background.
-4. Sets `WHISPER_HF_TOKEN` from Colab Secrets.
-5. Starts the FastAPI server and the RQ worker.
-6. Exposes the API via `ngrok` for external access.
+4. Starts the FastAPI server and the RQ worker.
+5. Exposes the API via `ngrok` for external access.
 
 To use on Colab:
 
 1. Open `speech2text_colab.ipynb` in Google Colab.
-2. Set the `WHISPER_HF_TOKEN` secret in Colab Secrets (key icon in the left sidebar).
-3. Run all cells in order.
-4. Copy the `ngrok` URL and use it as your API base URL.
+2. Run all cells in order.
+3. Copy the `ngrok` URL and use it as your API base URL.
 
 ---
 
@@ -790,7 +796,7 @@ To use on Colab:
 
 **Fix (automatic):** The `resegment_by_speakers()` step splits segments at word-level speaker changes.
 
-**Fix (improve detection):** Pass `min_speakers=2` to force pyannote to find at least two speakers:
+**Fix (improve detection):** Pass `min_speakers=2` to force the diarizer to find at least two speakers:
 ```bash
 curl -X POST http://localhost:8000/transcribe \
   -F "file=@audio.mp4" \
@@ -799,31 +805,20 @@ curl -X POST http://localhost:8000/transcribe \
 
 ---
 
-### `UnpicklingError` / `WeightsUnpickler` when loading pyannote
+### NeMo model download fails or is slow
 
-**Cause:** PyTorch 2.6+ changed the default `torch.load` behaviour to `weights_only=True`. pyannote checkpoints contain OmegaConf objects not in the safe allowlist.
+**Cause:** NeMo downloads models from NVIDIA NGC on first run (~2 GB total). This can be slow on limited connections.
 
-**Fix (automatic):** The code patches `torch.load` to force `weights_only=False` before importing pyannote. Check the logs for `"torch.load weights_only=False patch applied"`.
-
----
-
-### `crop` error / duration mismatch on `.mp4` files
-
-**Cause:** pyannote's internal `Audio.crop()` reads container duration from metadata, which can be longer than the actual decoded samples in `.mp4`/`.mkv`/`.webm` files.
-
-**Fix (automatic):** Audio is pre-loaded with librosa into an in-memory dict `{"waveform": tensor, "sample_rate": 16000}` and passed to the pipeline directly, bypassing pyannote's file I/O.
+**Fix:** Set `NEMO_CACHE_DIR` to a persistent directory so models are cached across restarts. Models are cached automatically after first download.
 
 ---
 
 ### Diarization is enabled but `speaker_count: 0` in stats
 
 **Causes and checks:**
-1. `WHISPER_HF_TOKEN` not set → see `"WHISPER_HF_TOKEN is NOT SET"` warning in logs.
-2. Model terms not accepted on HuggingFace → accept at:
-   - https://huggingface.co/pyannote/speaker-diarization-3.1
-   - https://huggingface.co/pyannote/segmentation-3.0
-3. Audio is too short (< 5 s) → pyannote may return no turns.
-4. Audio is single-speaker → expected, pass `min_speakers=1` to confirm.
+1. `nemo_toolkit[asr]` not installed → check for import errors in logs.
+2. Audio is too short (< 5 s) → NeMo may return no turns.
+3. Audio is single-speaker → expected, pass `min_speakers=1` to confirm.
 
 ---
 

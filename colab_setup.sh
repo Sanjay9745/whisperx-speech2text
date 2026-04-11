@@ -51,8 +51,8 @@ pip install --quiet --upgrade pip setuptools wheel
 
 # ---------------------------------------------------------------------------
 # 3b. Remove torchvision — Colab ships torchvision compiled for CUDA 12.8 but
-#     torch is now 2.11+cu130.  pyannote.audio imports torchvision and crashes
-#     when the CUDA major versions differ.
+#     torch is now 2.11+cu130.  This can cause issues when CUDA major versions
+#     differ.
 # ---------------------------------------------------------------------------
 echo "[3b/5] Removing torchvision (CUDA version mismatch with torch) …"
 pip uninstall -y torchvision 2>/dev/null || true
@@ -65,17 +65,12 @@ pip uninstall -y torchvision 2>/dev/null || true
 echo "[4/5] Installing Python dependencies …"
 
 # WhisperX v3.8.5 runtime deps first (without whisperx itself)
-# IMPORTANT: pin pyannote.audio==4.0.1 — the last release with a flexible
-# torch dependency (torch>=2.0).  4.0.2+ hard-pins torch==2.8.0 exactly,
-# which conflicts with Colab's torch 2.10+ and causes ImportError:
-#   "cannot import name 'is_opaque_value' from 'torch._library.opaque_object'"
+# NVIDIA NeMo for speaker diarization (replaces pyannote.audio)
 pip install --quiet \
     "numpy>=2.2.2" \
     "ctranslate2>=4.5.0" \
     "faster-whisper>=1.2.0" \
-    "pyannote.audio==4.0.1" \
-    "pyannote.core>=5.0.0" \
-    "pyannote.pipeline>=3.0.1" \
+    "nemo_toolkit[asr]>=2.0.0" \
     "omegaconf>=2.3.0"
 
 # App dependencies (ranges let Colab's other packages coexist)
@@ -110,58 +105,7 @@ pip install --quiet --no-deps \
 # ---------------------------------------------------------------------------
 # 6. Runtime compatibility patches
 # ---------------------------------------------------------------------------
-echo "[6/6] Applying runtime compatibility patches …"
-python - <<'PATCHEOF'
-import site, pathlib, textwrap, sys
-
-sp = pathlib.Path(site.getsitepackages()[0])
-
-# Patch A — torch.load weights_only shim (torch 2.6+ changed default to True).
-# pyannote checkpoints contain OmegaConf objects not in the safe allowlist.
-pyannote_init = sp / "pyannote" / "audio" / "__init__.py"
-SHIM = textwrap.dedent("""\
-    # torch.load weights_only shim — do not remove
-    import torch as _torch
-    from packaging.version import Version as _V
-    if _V(_torch.__version__.split("+")[0]) >= _V("2.6.0"):
-        if not getattr(_torch.load, "_pyannote_patched", False):
-            _orig_load = _torch.load
-            def _safe_load(*a, **kw):
-                # FORCE weights_only=False — pytorch-lightning passes True explicitly,
-                # so setdefault() has no effect; we must override it.
-                kw["weights_only"] = False
-                return _orig_load(*a, **kw)
-            _safe_load._pyannote_patched = True
-            _torch.load = _safe_load
-    del _torch, _V
-""")
-if pyannote_init.exists():
-    text = pyannote_init.read_text()
-    if "weights_only shim" not in text:
-        pyannote_init.write_text(SHIM + "\n" + text)
-        print("  ✅  Patch A: torch.load weights_only shim injected")
-    else:
-        print("  ✅  Patch A: already present")
-else:
-    print("  ⏭️  Patch A: pyannote __init__.py not found")
-
-# Patch B — speechbrain torchaudio.list_audio_backends() removed in 2.9+.
-sb_file = sp / "speechbrain" / "utils" / "torch_audio_backend.py"
-OLD = "available_backends = torchaudio.list_audio_backends()"
-NEW = ("available_backends = torchaudio.list_audio_backends() "
-       "if hasattr(torchaudio, 'list_audio_backends') else []")
-if sb_file.exists():
-    text = sb_file.read_text()
-    if NEW in text:
-        print("  ✅  Patch B: already present")
-    elif OLD in text:
-        sb_file.write_text(text.replace(OLD, NEW))
-        print("  ✅  Patch B: speechbrain torchaudio shim patched")
-    else:
-        print("  ℹ️  Patch B: pattern not found — may be fixed upstream")
-else:
-    print("  ⏭️  Patch B: speechbrain not installed yet")
-PATCHEOF
+echo "[6/6] No pyannote patches needed — using NVIDIA NeMo for diarization."
 
 # ---------------------------------------------------------------------------
 # Verify
@@ -175,7 +119,7 @@ checks = {
     "faster_whisper": lambda: __import__("faster_whisper").__version__,
     "whisperx"      : lambda: getattr(__import__("whisperx"), "__version__", "installed (no __version__)"),
     "fastapi"       : lambda: __import__("fastapi").__version__,
-    "pyannote.audio": lambda: __import__("pyannote.audio").__version__,
+    "nemo_toolkit"  : lambda: __import__("nemo").__version__,
 }
 for pkg, fn in checks.items():
     try:
@@ -202,8 +146,8 @@ echo "============================================================"
 echo " Setup complete!  Next steps:"
 echo ""
 echo "   1. Fill in env vars (Section 5 of the Colab notebook):"
-echo "        export WHISPER_HF_TOKEN=hf_..."
 echo "        export WHISPER_API_KEYS=my-secret-key"
+echo "        # No HF token needed — NeMo downloads models from NVIDIA NGC"
 echo ""
 echo "   2. Start the API:"
 echo "        uvicorn app.main:app --host 0.0.0.0 --port 8000 &"

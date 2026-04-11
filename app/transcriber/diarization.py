@@ -1,19 +1,23 @@
 """
-Speaker diarization using pyannote.audio.
+Speaker diarization using NVIDIA NeMo.
 Assigns speaker labels to transcription segments.
+
+Uses NeMo's NeuralDiarizer (MSDD — Multi-Scale Diarization Decoder) with
+TitaNet speaker embeddings and MarbleNet VAD.  No HuggingFace token is
+required — all models are downloaded from NVIDIA NGC automatically.
 
 Compatibility notes
 -------------------
-* pyannote.audio 4.x - use ``token=`` (not the deprecated ``use_auth_token=``).
-* torch 2.6+ - changed torch.load default to weights_only=True, which breaks
-  pyannote checkpoint loading (OmegaConf objects not in safe allowlist).
-  We patch torch.load before importing pyannote so it defaults to False.
-* speechbrain (pulled in by pyannote) - torchaudio.list_audio_backends()
-  was removed in torchaudio 2.9+; see app/transcriber/diarization.py patch.
+* nemo_toolkit[asr] — provides NeuralDiarizer, ClusteringDiarizer, TitaNet,
+  MarbleNet VAD, and all speaker-diarization utilities.
+* Models are cached in the NeMo cache directory (~/.cache/nemo or the path
+  set by NEMO_CACHE_DIR env var).
 """
 
 from __future__ import annotations
 
+import json
+import os
 import re
 from collections import Counter
 from typing import Any, Dict, List, Optional
@@ -23,151 +27,185 @@ from loguru import logger
 
 from app.config import get_config
 
-_pipeline: Optional[Any] = None
 _SPEAKER_LABEL_PATTERN = re.compile(r"speaker[_\s-]*(\d+)$", re.IGNORECASE)
 
 
-def _apply_torch_load_patch() -> None:
+def _build_nemo_config(device: torch.device, out_dir: str) -> Any:
     """
-    Patch torch.load to FORCE weights_only=False.
+    Build an OmegaConf configuration for NeMo NeuralDiarizer.
 
-    torch 2.6+ changed the default to True for security, but:
-    - pyannote.audio checkpoints contain OmegaConf / TorchVersion objects not in
-      PyTorch's safe-globals allowlist → UnpicklingError.
-    - pytorch-lightning (used internally by pyannote) calls torch.load with
-      weights_only=True EXPLICITLY, so setdefault() is not enough — we must
-      OVERRIDE the value to False unconditionally.
-
-    We guard against double-patching by checking for our sentinel attribute.
-    This is safe because we only load trusted HuggingFace official models.
+    This mirrors the ``diar_infer_telephonic.yaml`` config from NeMo and
+    overrides the key parameters for our use case.
     """
-    # Guard: don't patch more than once (avoids recursive wrapper chains)
-    if getattr(torch.load, "_pyannote_patched", False):
-        logger.debug("torch.load already patched — skipping")
-        return
+    from omegaconf import OmegaConf
 
+    nemo_cfg = OmegaConf.create({
+        "device": device.type,
+        "num_workers": 1,
+        "sample_rate": 16000,
+        "batch_size": 64,
+        "diarizer": {
+            "manifest_filepath": None,  # Set per-call
+            "out_dir": out_dir,
+            "oracle_vad": False,
+            "collar": 0.25,
+            "ignore_overlap": True,
+            "vad": {
+                "model_path": "vad_multilingual_marblenet",
+                "external_vad_manifest": None,
+                "parameters": {
+                    "window_length_in_sec": 0.15,
+                    "shift_length_in_sec": 0.01,
+                    "smoothing": "median",
+                    "overlap": 0.875,
+                    "onset": 0.8,
+                    "offset": 0.6,
+                    "pad_onset": 0.05,
+                    "pad_offset": -0.05,
+                    "min_duration_on": 0.2,
+                    "min_duration_off": 0.2,
+                    "filter_speech_first": True,
+                },
+            },
+            "speaker_embeddings": {
+                "model_path": "titanet_large",
+                "parameters": {
+                    "window_length_in_sec": [1.5, 1.25, 1.0, 0.75, 0.5],
+                    "shift_length_in_sec": [0.75, 0.625, 0.5, 0.375, 0.25],
+                    "multiscale_weights": [1, 1, 1, 1, 1],
+                    "save_embeddings": False,
+                },
+            },
+            "clustering": {
+                "parameters": {
+                    "oracle_num_speakers": False,
+                    "max_num_speakers": 20,
+                    "enhanced_count_thres": 80,
+                    "max_rp_threshold": 0.25,
+                    "sparse_search_volume": 30,
+                },
+            },
+            "msdd_model": {
+                "model_path": "diar_msdd_telephonic",
+                "parameters": {
+                    "sigmoid_threshold": [0.7, 1.0],
+                },
+            },
+        },
+    })
+
+    return nemo_cfg
+
+
+def _create_manifest(
+    audio_path: str,
+    out_dir: str,
+    num_speakers: Optional[int] = None,
+) -> str:
+    """
+    Create a NeMo-style manifest JSON file for the audio.
+
+    NeMo diarizers expect a JSON-lines manifest with fields:
+    audio_filepath, offset, duration, label, text, num_speakers,
+    rttm_filepath, uem_filepath.
+    """
+    import soundfile as sf
+
+    # Get audio duration
     try:
-        # Version check — only needed on torch >= 2.6
+        info = sf.info(audio_path)
+        duration = info.duration
+    except Exception:
+        # Fallback: load with librosa
+        from app.transcriber.chunker import load_audio
+        audio_np, sr = load_audio(audio_path, sr=16_000)
+        duration = len(audio_np) / sr
+
+    manifest_entry = {
+        "audio_filepath": os.path.abspath(audio_path),
+        "offset": 0,
+        "duration": duration,
+        "label": "infer",
+        "text": "-",
+        "num_speakers": num_speakers,
+        "rttm_filepath": None,
+        "uem_filepath": None,
+    }
+
+    manifest_path = os.path.join(out_dir, "input_manifest.json")
+    with open(manifest_path, "w") as f:
+        json.dump(manifest_entry, f)
+        f.write("\n")
+
+    return manifest_path
+
+
+def _convert_audio_to_wav(audio_path: str, out_dir: str) -> str:
+    """
+    Convert audio to 16 kHz mono WAV if needed.  NeMo works best with WAV.
+
+    Returns the path to use (original if already suitable, else converted).
+    """
+    import soundfile as sf
+
+    wav_path = os.path.join(
+        out_dir,
+        os.path.splitext(os.path.basename(audio_path))[0] + "_16k.wav",
+    )
+
+    if audio_path.lower().endswith(".wav"):
         try:
-            from packaging.version import Version
-            need_patch = Version(torch.__version__.split("+")[0]) >= Version("2.6.0")
-        except ImportError:
-            parts = torch.__version__.split("+")[0].split(".")
-            major, minor = int(parts[0]), int(parts[1]) if len(parts) > 1 else 0
-            need_patch = (major, minor) >= (2, 6)
+            info = sf.info(audio_path)
+            if info.samplerate == 16000 and info.channels == 1:
+                return audio_path
+        except Exception:
+            pass
 
-        if not need_patch:
-            logger.debug(f"torch.load patch not needed (torch {torch.__version__})")
-            return
+    from app.transcriber.chunker import load_audio
 
-        _orig = torch.load
-
-        def _patched_load(*args, **kwargs):
-            # FORCE weights_only=False — override even if caller passed True explicitly.
-            # Required because pytorch-lightning passes weights_only=True directly.
-            kwargs["weights_only"] = False
-            return _orig(*args, **kwargs)
-
-        _patched_load._pyannote_patched = True  # type: ignore[attr-defined]
-        torch.load = _patched_load  # type: ignore[method-assign]
-        logger.debug(f"torch.load weights_only=False patch applied (torch {torch.__version__})")
-
-    except Exception as exc:
-        logger.warning(f"torch.load patch failed: {exc} — pyannote may fail to load checkpoints")
-
-
-def _load_pipeline():
-    """Load pyannote diarization pipeline (cached)."""
-    global _pipeline
-    if _pipeline is not None:
-        return _pipeline
-
-    cfg = get_config()
-    if not cfg.diarization.enabled:
-        logger.info("Diarization is disabled in config")
-        return None
-
-    hf_token = cfg.diarization.hf_token
-    if not hf_token:
-        logger.error(
-            "Diarization enabled but hf_token is empty. "
-            "Set WHISPER_HF_TOKEN env var or diarization.hf_token in config.yaml. "
-            "Speaker labels will NOT be generated."
-        )
-        return None
-
-    # Apply torch.load compat patch BEFORE importing pyannote.
-    _apply_torch_load_patch()
-
-    try:
-        from pyannote.audio import Pipeline
-    except ImportError as exc:
-        logger.error(
-            f"pyannote.audio is not installed or failed to import: {exc}. "
-            "Install it with: pip install pyannote.audio==4.0.1"
-        )
-        return None
-
-    device = (
-        torch.device("cuda")
-        if torch.cuda.is_available() and cfg.model.device == "cuda"
-        else torch.device("cpu")
-    )
-
-    try:
-        logger.info(
-            f"Loading pyannote diarization pipeline "
-            f"(token={hf_token[:8]}…, device={device}) ..."
-        )
-        _pipeline = Pipeline.from_pretrained(
-            "pyannote/speaker-diarization-3.1",
-            token=hf_token,
-        )
-        _pipeline = _pipeline.to(device)
-        logger.info("Diarization pipeline loaded successfully")
-        return _pipeline
-    except Exception as exc:
-        import traceback
-        logger.error(
-            f"Failed to load diarization pipeline: {exc}\n"
-            f"{traceback.format_exc()}\n"
-            "Common fixes:\n"
-            "  1. Accept model terms at https://huggingface.co/pyannote/speaker-diarization-3.1\n"
-            "  2. Accept model terms at https://huggingface.co/pyannote/segmentation-3.0\n"
-            "  3. Ensure your HF token has 'read' scope\n"
-            "  4. Check that pyannote.audio is compatible with your torch version"
-        )
-        return None
-
-
-def _load_audio_for_diarization(audio_path: str) -> Dict[str, Any]:
-    """
-    Pre-load audio into memory as a dict accepted by pyannote Pipeline.
-
-    pyannote's internal ``Audio.crop()`` relies on ffmpeg / torchaudio to read
-    the file, and its duration comes from container metadata.  For container
-    formats like **.mp4 / .mkv / .webm** the reported duration can exceed the
-    actual number of decoded samples, causing::
-
-        "requested chunk [...] resulted in N samples instead of expected M"
-
-    By loading with **librosa** (which always returns exactly the decoded
-    samples) and passing the waveform as an in-memory dict we bypass
-    pyannote's file I/O entirely, eliminating the mismatch.
-
-    Returns ``{"waveform": Tensor(1, T), "sample_rate": 16000}``.
-    """
-    from app.transcriber.chunker import load_audio  # already handles all formats
-
-    logger.info(f"Pre-loading audio for diarization: {audio_path}")
+    logger.info(f"Converting audio to 16 kHz mono WAV for NeMo: {audio_path}")
     audio_np, sr = load_audio(audio_path, sr=16_000)
-    duration_sec = len(audio_np) / sr
-    logger.info(
-        f"Audio loaded: {duration_sec:.1f}s, {len(audio_np)} samples @ {sr} Hz"
-    )
+    sf.write(wav_path, audio_np, 16000, subtype="PCM_16")
+    logger.info(f"Audio converted: {wav_path} ({len(audio_np) / sr:.1f}s)")
+    return wav_path
 
-    waveform = torch.from_numpy(audio_np).unsqueeze(0).float()  # (1, T)
-    return {"waveform": waveform, "sample_rate": sr}
+
+def _parse_rttm_file(rttm_path: str) -> List[Dict[str, Any]]:
+    """
+    Parse an RTTM file produced by NeMo and return speaker turns.
+
+    RTTM format (space-separated):
+    SPEAKER <file_id> 1 <start> <duration> <NA> <NA> <speaker_id> <NA> <NA>
+    """
+    turns: List[Dict[str, Any]] = []
+
+    if not os.path.exists(rttm_path):
+        logger.warning(f"RTTM file not found: {rttm_path}")
+        return turns
+
+    with open(rttm_path, "r") as f:
+        for line in f:
+            line = line.strip()
+            if not line or not line.startswith("SPEAKER"):
+                continue
+
+            parts = line.split()
+            if len(parts) < 8:
+                continue
+
+            try:
+                start = float(parts[3])
+                duration = float(parts[4])
+                speaker = parts[7]
+                turns.append({
+                    "start": round(start, 3),
+                    "end": round(start + duration, 3),
+                    "speaker": speaker,
+                })
+            except (ValueError, IndexError) as e:
+                logger.warning(f"Failed to parse RTTM line: {line} — {e}")
+
+    return turns
 
 
 def diarize(
@@ -178,65 +216,78 @@ def diarize(
     num_speakers: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     """
-    Run speaker diarization on *audio_path*.
+    Run speaker diarization on *audio_path* using NVIDIA NeMo.
 
     Parameters
     ----------
     min_speakers / max_speakers / num_speakers
-        Hints passed directly to pyannote's pipeline.  ``num_speakers``
-        takes precedence when set.  These dramatically improve accuracy
-        for conversational audio where the speaker count is known.
+        Hints for speaker count.  ``num_speakers`` takes precedence when
+        set.  These dramatically improve accuracy for conversational audio
+        where the speaker count is known.
 
-    Returns list of {start, end, speaker}.
+    Returns list of ``{start, end, speaker}``.
     """
-    pipeline = _load_pipeline()
-    if pipeline is None:
-        logger.warning(
-            "Diarization pipeline is not available — returning empty speaker turns. "
-            "Check earlier log messages for the root cause."
-        )
+    cfg = get_config()
+
+    if not cfg.diarization.enabled:
+        logger.warning("Diarization is disabled — returning empty speaker turns.")
         return []
 
     try:
-        # Pre-load audio into memory to avoid pyannote's ffmpeg duration
-        # mismatch with container formats (.mp4, .mkv, .webm, etc.).
-        audio_input = _load_audio_for_diarization(audio_path)
+        from nemo.collections.asr.models import NeuralDiarizer
+    except ImportError as exc:
+        logger.error(
+            f"nemo_toolkit[asr] is not installed: {exc}. "
+            "Install it with: pip install 'nemo_toolkit[asr]'"
+        )
+        return []
 
-        # Build optional kwargs for speaker count hints
-        pipeline_kwargs: Dict[str, Any] = {}
+    device = (
+        torch.device("cuda")
+        if torch.cuda.is_available() and cfg.model.device == "cuda"
+        else torch.device("cpu")
+    )
+
+    # Working directory for intermediate NeMo outputs
+    nemo_out_dir = os.path.join(cfg.paths.temp_dir, "nemo_diarization")
+    os.makedirs(nemo_out_dir, exist_ok=True)
+
+    converted_wav: Optional[str] = None
+
+    try:
+        # 1. Convert audio to 16 kHz mono WAV
+        wav_path = _convert_audio_to_wav(audio_path, nemo_out_dir)
+        if wav_path != audio_path:
+            converted_wav = wav_path
+
+        # 2. Create manifest
+        manifest_path = _create_manifest(
+            wav_path, nemo_out_dir, num_speakers=num_speakers
+        )
+
+        # 3. Build NeMo config
+        nemo_cfg = _build_nemo_config(device, nemo_out_dir)
+        nemo_cfg.diarizer.manifest_filepath = manifest_path
+
         if num_speakers is not None and num_speakers > 0:
-            pipeline_kwargs["num_speakers"] = num_speakers
-            logger.info(f"Diarization: num_speakers={num_speakers}")
+            nemo_cfg.diarizer.clustering.parameters.oracle_num_speakers = True
+            logger.info(f"Diarization: num_speakers={num_speakers} (oracle mode)")
         else:
-            if min_speakers is not None and min_speakers > 0:
-                pipeline_kwargs["min_speakers"] = min_speakers
+            nemo_cfg.diarizer.clustering.parameters.oracle_num_speakers = False
             if max_speakers is not None and max_speakers > 0:
-                pipeline_kwargs["max_speakers"] = max_speakers
-            if pipeline_kwargs:
-                logger.info(f"Diarization: {pipeline_kwargs}")
+                nemo_cfg.diarizer.clustering.parameters.max_num_speakers = max_speakers
+                logger.info(f"Diarization: max_speakers={max_speakers}")
 
-        logger.info(f"Running diarization on {audio_path} ...")
-        diarization_result = pipeline(audio_input, **pipeline_kwargs)
+        # 4. Run NeMo NeuralDiarizer
+        logger.info(f"Running NeMo diarization on {audio_path} ...")
+        diarizer = NeuralDiarizer(cfg=nemo_cfg).to(device)
+        diarizer.diarize()
 
-        # pyannote.audio 4.x returns DiarizeOutput; 3.x returns Annotation.
-        # DiarizeOutput wraps the Annotation in .speaker_diarization.
-        annotation = getattr(
-            diarization_result, "speaker_diarization", diarization_result
-        )
-        logger.debug(
-            f"Pipeline returned {type(diarization_result).__name__}; "
-            f"using {type(annotation).__name__} for itertracks"
-        )
+        # 5. Parse RTTM output
+        audio_name = os.path.splitext(os.path.basename(wav_path))[0]
+        rttm_path = os.path.join(nemo_out_dir, "pred_rttms", f"{audio_name}.rttm")
 
-        raw_turns: List[Dict[str, Any]] = []
-        for turn, _, speaker in annotation.itertracks(yield_label=True):
-            raw_turns.append(
-                {
-                    "start": round(turn.start, 3),
-                    "end": round(turn.end, 3),
-                    "speaker": speaker,
-                }
-            )
+        raw_turns = _parse_rttm_file(rttm_path)
 
         if not raw_turns:
             logger.warning(
@@ -246,7 +297,7 @@ def diarize(
             return []
 
         turns = _normalize_turn_speakers(raw_turns)
-        unique_speakers = set(t['speaker'] for t in turns)
+        unique_speakers = set(t["speaker"] for t in turns)
         logger.info(
             f"Diarization found {len(unique_speakers)} speaker(s) "
             f"with {len(turns)} turn(s): {unique_speakers}"
@@ -257,7 +308,18 @@ def diarize(
         import traceback
         logger.error(f"Diarization failed: {exc}\n{traceback.format_exc()}")
         return []
+    finally:
+        # Clean up the converted WAV if we created one
+        if converted_wav and os.path.exists(converted_wav):
+            try:
+                os.unlink(converted_wav)
+            except Exception:
+                pass
 
+
+# ---------------------------------------------------------------------------
+# Speaker-assignment & re-segmentation (unchanged from original)
+# ---------------------------------------------------------------------------
 
 def assign_speakers(
     segments: List[Dict[str, Any]],
@@ -363,7 +425,6 @@ def assign_speakers(
             )
 
             if timestamps_unreliable and len(words) > 1:
-                # Distribute words evenly across the segment's time range
                 seg_dur = max(seg_end - seg_start, 0.001)
                 step = seg_dur / len(words)
                 for i, word in enumerate(words):
@@ -377,7 +438,6 @@ def assign_speakers(
                     if spk_id:
                         word["speaker_id"] = spk_id
             else:
-                # Normal path — word timestamps are usable
                 for word in words:
                     w_start = _safe_time(word.get("start", seg_start))
                     w_end = _safe_time(word.get("end", w_start))
@@ -398,14 +458,12 @@ def assign_speakers(
             if first_speaker_id:
                 seg["speaker_id"] = first_speaker_id
         else:
-            # No words — fall back to segment-level overlap
             matched = _find_speaker_at(seg_start, seg_end)
             seg["speaker"] = matched.get("speaker", "UNKNOWN")
             spk_id = str(matched.get("speaker_id", "")).strip()
             if spk_id:
                 seg["speaker_id"] = spk_id
 
-    # Log summary
     seg_speakers = Counter(str(s.get("speaker", "")) for s in segments)
     logger.info(
         f"Speaker assignment complete: {len(segments)} segments → "
@@ -422,16 +480,9 @@ def resegment_by_speakers(
     Split segments at speaker-change boundaries.
 
     Whisper creates segments based on *content* boundaries (sentences,
-    pauses) — NOT speaker changes.  This means a single Whisper segment
-    may contain words from two speakers when they speak in quick
-    succession (common in conversations).
-
-    After ``assign_speakers()`` has labeled each **word** with its speaker,
-    this function walks through every segment and splits it whenever the
-    speaker changes between consecutive words.  The result is a list of
-    segments where **each segment has exactly one speaker**.
-
-    Segments without words are passed through unchanged.
+    pauses) — NOT speaker changes.  After ``assign_speakers()`` has labeled
+    each **word** with its speaker, this function splits whenever the
+    speaker changes between consecutive words.
     """
     if not segments:
         return segments
@@ -442,13 +493,11 @@ def resegment_by_speakers(
     for seg in segments:
         words = seg.get("words", [])
         if not words:
-            # No words → keep as-is
             seg["id"] = seg_id
             new_segments.append(seg)
             seg_id += 1
             continue
 
-        # Group consecutive words by speaker
         groups: List[List[Dict[str, Any]]] = []
         current_group: List[Dict[str, Any]] = [words[0]]
         current_speaker = str(words[0].get("speaker", ""))
@@ -465,13 +514,11 @@ def resegment_by_speakers(
         groups.append(current_group)
 
         if len(groups) == 1:
-            # No speaker change — keep segment intact
             seg["id"] = seg_id
             new_segments.append(seg)
             seg_id += 1
             continue
 
-        # Multiple speakers in this segment → split
         for group_words in groups:
             group_speaker = str(group_words[0].get("speaker", "UNKNOWN"))
             group_speaker_id = ""
@@ -485,7 +532,6 @@ def resegment_by_speakers(
                 str(w.get("word", "")).strip() for w in group_words
             ).strip()
 
-            # Determine time range from word timestamps
             starts = [
                 _safe_time(w.get("start"))
                 for w in group_words
@@ -520,6 +566,10 @@ def resegment_by_speakers(
 
     return new_segments
 
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
 
 def _safe_time(value: Any, default: float = 0.0) -> float:
     try:

@@ -13,8 +13,8 @@ Environment variable overrides (all optional, highest priority):
   WHISPER_BEAM_SIZE           — int, beam search width
   WHISPER_TEMPERATURE         — float, sampling temperature
   WHISPER_BEST_OF             — int, best-of for sampling
-  WHISPER_HF_TOKEN            — Hugging Face token for pyannote diarization
-  WHISPER_DIARIZATION_ENABLED — 1/true/yes to enable diarization
+  WHISPER_HF_TOKEN            — Hugging Face token (optional, no longer required for diarization)
+  WHISPER_DIARIZATION_ENABLED — 1/true/yes to enable diarization (uses NVIDIA NeMo)
   WHISPER_DIARIZATION_NUM_SPEAKERS — int, exact expected speaker count
   WHISPER_DIARIZATION_MIN_SPEAKERS — int, minimum expected speakers (e.g. 2)
   WHISPER_DIARIZATION_MAX_SPEAKERS — int, maximum expected speakers (e.g. 5)
@@ -89,13 +89,13 @@ class AccuracyConfig:
 class DiarizationConfig:
     def __init__(self, data: dict):
         self.enabled: bool = bool(data.get("enabled", True))
-        self.hf_token: str = data.get("hf_token", "")
+        self.hf_token: str = data.get("hf_token", "")  # kept for backward compat, no longer required
         # Pipeline mode: "post" = current (transcribe then diarize),
         #                "pre"  = diarize first then transcribe per speaker turn
         self.mode: str = str(data.get("mode", "post")).strip().lower()
         if self.mode not in ("pre", "post"):
             self.mode = "post"
-        # Optional speaker count hints passed to pyannote pipeline
+        # Optional speaker count hints passed to NeMo diarizer
         self.num_speakers: Optional[int] = _opt_int(data.get("num_speakers"))
         self.min_speakers: Optional[int] = _opt_int(data.get("min_speakers"))
         self.max_speakers: Optional[int] = _opt_int(data.get("max_speakers"))

@@ -13,7 +13,7 @@
 #    Cell 2: git clone/pull repo
 #    Cell 3: pip install -r requirements.txt
 #    Cell 4: export env variables
-#    Cell 5: python -c "import pyannote; print('✅ pyannote imports')"
+#    Cell 5: python -c "import nemo; print('✅ nemo imports')"
 #    Cell 6: redis-server --daemonize yes
 #    Cell 7: Start API + Worker (cloudflared tunnel auto-opens)
 #
