@@ -19,6 +19,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
+import tempfile
 from collections import Counter
 from typing import Any, Dict, List, Optional
 
@@ -30,72 +32,122 @@ from app.config import get_config
 _SPEAKER_LABEL_PATTERN = re.compile(r"speaker[_\s-]*(\d+)$", re.IGNORECASE)
 
 
-def _build_nemo_config(device: torch.device, out_dir: str) -> Any:
+def _build_nemo_config(device: torch.device, out_dir: str, yaml_cache_dir: Optional[str] = None) -> Any:
     """
-    Build an OmegaConf configuration for NeMo NeuralDiarizer.
+    Build a NeMo OmegaConf configuration for NeuralDiarizer.
 
-    This mirrors the ``diar_infer_telephonic.yaml`` config from NeMo and
-    overrides the key parameters for our use case.
+    We download NeMo's official ``diar_infer_telephonic.yaml`` and patch
+    only the fields we need to change.  This avoids missing required fields
+    that arise when constructing the config from scratch.
+
+    Parameters
+    ----------
+    out_dir : str
+        Per-job output directory (set as ``diarizer.out_dir``).
+    yaml_cache_dir : str, optional
+        Directory to cache the downloaded YAML so it survives per-job
+        cleanup.  Defaults to *out_dir* when not provided.
     """
     from omegaconf import OmegaConf
+    import urllib.request
 
-    nemo_cfg = OmegaConf.create({
-        "device": device.type,
-        "num_workers": 1,
-        "sample_rate": 16000,
-        "batch_size": 64,
-        "diarizer": {
-            "manifest_filepath": None,  # Set per-call
-            "out_dir": out_dir,
-            "oracle_vad": False,
-            "collar": 0.25,
-            "ignore_overlap": True,
-            "vad": {
-                "model_path": "vad_multilingual_marblenet",
-                "external_vad_manifest": None,
-                "parameters": {
-                    "window_length_in_sec": 0.15,
-                    "shift_length_in_sec": 0.01,
-                    "smoothing": "median",
-                    "overlap": 0.875,
-                    "onset": 0.8,
-                    "offset": 0.6,
-                    "pad_onset": 0.05,
-                    "pad_offset": -0.05,
-                    "min_duration_on": 0.2,
-                    "min_duration_off": 0.2,
-                    "filter_speech_first": True,
+    # Try to load official NeMo YAML config (most reliable approach).
+    # Cache in yaml_cache_dir (the base dir) so it survives per-job cleanup.
+    cache_dir = yaml_cache_dir or out_dir
+    yaml_url = (
+        "https://raw.githubusercontent.com/NVIDIA/NeMo/main/examples/"
+        "speaker_tasks/diarization/conf/inference/diar_infer_telephonic.yaml"
+    )
+    yaml_cache = os.path.join(cache_dir, "diar_infer_telephonic.yaml")
+
+    if not os.path.exists(yaml_cache):
+        try:
+            logger.info(f"Downloading NeMo diarization config from: {yaml_url}")
+            urllib.request.urlretrieve(yaml_url, yaml_cache)
+        except Exception as dl_err:
+            logger.warning(
+                f"Could not download NeMo YAML config ({dl_err}); "
+                "falling back to built-in config."
+            )
+            yaml_cache = None
+
+    if yaml_cache and os.path.exists(yaml_cache):
+        nemo_cfg = OmegaConf.load(yaml_cache)
+    else:
+        # Fallback: construct minimal config from scratch
+        nemo_cfg = OmegaConf.create({
+            "device": device.type,
+            "num_workers": 1,
+            "sample_rate": 16000,
+            "batch_size": 64,
+            "diarizer": {
+                "manifest_filepath": None,
+                "out_dir": out_dir,
+                "oracle_vad": False,
+                "collar": 0.25,
+                "ignore_overlap": True,
+                "vad": {
+                    "model_path": "vad_multilingual_marblenet",
+                    "external_vad_manifest": None,
+                    "parameters": {
+                        "window_length_in_sec": 0.15,
+                        "shift_length_in_sec": 0.01,
+                        "smoothing": "median",
+                        "overlap": 0.875,
+                        "onset": 0.8,
+                        "offset": 0.6,
+                        "pad_onset": 0.05,
+                        "pad_offset": -0.05,
+                        "min_duration_on": 0.2,
+                        "min_duration_off": 0.2,
+                        "filter_speech_first": True,
+                    },
+                },
+                "speaker_embeddings": {
+                    "model_path": "titanet_large",
+                    "parameters": {
+                        "window_length_in_sec": [1.5, 1.25, 1.0, 0.75, 0.5],
+                        "shift_length_in_sec": [0.75, 0.625, 0.5, 0.375, 0.25],
+                        "multiscale_weights": [1, 1, 1, 1, 1],
+                        "save_embeddings": False,
+                    },
+                },
+                "clustering": {
+                    "parameters": {
+                        "oracle_num_speakers": False,
+                        "max_num_speakers": 20,
+                        "enhanced_count_thres": 80,
+                        "max_rp_threshold": 0.25,
+                        "sparse_search_volume": 30,
+                    },
+                },
+                "msdd_model": {
+                    "model_path": "diar_msdd_telephonic",
+                    "parameters": {
+                        "sigmoid_threshold": [0.7, 1.0],
+                    },
                 },
             },
-            "speaker_embeddings": {
-                "model_path": "titanet_large",
-                "parameters": {
-                    "window_length_in_sec": [1.5, 1.25, 1.0, 0.75, 0.5],
-                    "shift_length_in_sec": [0.75, 0.625, 0.5, 0.375, 0.25],
-                    "multiscale_weights": [1, 1, 1, 1, 1],
-                    "save_embeddings": False,
-                },
-            },
-            "clustering": {
-                "parameters": {
-                    "oracle_num_speakers": False,
-                    "max_num_speakers": 20,
-                    "enhanced_count_thres": 80,
-                    "max_rp_threshold": 0.25,
-                    "sparse_search_volume": 30,
-                },
-            },
-            "msdd_model": {
-                "model_path": "diar_msdd_telephonic",
-                "parameters": {
-                    "sigmoid_threshold": [0.7, 1.0],
-                },
-            },
-        },
-    })
+        })
+
+    # Always patch these fields regardless of how the config was loaded
+    OmegaConf.set_struct(nemo_cfg, False)
+    nemo_cfg.device = device.type
+    nemo_cfg.diarizer.out_dir = out_dir
+    nemo_cfg.diarizer.oracle_vad = False
+    nemo_cfg.diarizer.vad.model_path = "vad_multilingual_marblenet"
+    nemo_cfg.diarizer.vad.parameters.onset = 0.8
+    nemo_cfg.diarizer.vad.parameters.offset = 0.6
+    nemo_cfg.diarizer.vad.parameters.pad_offset = -0.05
+    nemo_cfg.diarizer.speaker_embeddings.model_path = "titanet_large"
+    nemo_cfg.diarizer.speaker_embeddings.parameters.multiscale_weights = [1, 1, 1, 1, 1]
+    nemo_cfg.diarizer.speaker_embeddings.parameters.window_length_in_sec = [1.5, 1.25, 1.0, 0.75, 0.5]
+    nemo_cfg.diarizer.speaker_embeddings.parameters.shift_length_in_sec = [0.75, 0.625, 0.5, 0.375, 0.25]
+    nemo_cfg.diarizer.msdd_model.model_path = "diar_msdd_telephonic"
+    nemo_cfg.diarizer.msdd_model.parameters.sigmoid_threshold = [0.7, 1.0]
+    nemo_cfg.num_workers = 1
 
     return nemo_cfg
-
 
 def _create_manifest(
     audio_path: str,
@@ -248,28 +300,33 @@ def diarize(
         else torch.device("cpu")
     )
 
-    # Working directory for intermediate NeMo outputs
-    nemo_out_dir = os.path.join(cfg.paths.temp_dir, "nemo_diarization")
-    os.makedirs(nemo_out_dir, exist_ok=True)
+    # Use a unique temp directory per call to avoid cross-job collisions.
+    # The base nemo_diarization dir holds the downloaded YAML config only.
+    nemo_base_dir = os.path.join(cfg.paths.temp_dir, "nemo_diarization")
+    os.makedirs(nemo_base_dir, exist_ok=True)
+
+    # Per-call isolated output dir so concurrent jobs never clash
+    job_out_dir = tempfile.mkdtemp(prefix="nemo_job_", dir=nemo_base_dir)
 
     converted_wav: Optional[str] = None
 
     try:
-        # 1. Convert audio to 16 kHz mono WAV
-        wav_path = _convert_audio_to_wav(audio_path, nemo_out_dir)
+        # 1. Convert audio to 16 kHz mono WAV (NeMo requires this)
+        wav_path = _convert_audio_to_wav(audio_path, job_out_dir)
         if wav_path != audio_path:
             converted_wav = wav_path
 
-        # 2. Create manifest
+        # 2. Create NeMo manifest (JSON-lines)
         manifest_path = _create_manifest(
-            wav_path, nemo_out_dir, num_speakers=num_speakers
+            wav_path, job_out_dir, num_speakers=num_speakers
         )
 
-        # 3. Build NeMo config
-        nemo_cfg = _build_nemo_config(device, nemo_out_dir)
+        # 3. Build NeMo config (downloads official YAML once, then patches)
+        nemo_cfg = _build_nemo_config(device, job_out_dir, yaml_cache_dir=nemo_base_dir)
         nemo_cfg.diarizer.manifest_filepath = manifest_path
 
         if num_speakers is not None and num_speakers > 0:
+            # Oracle mode: tell NeMo exactly how many speakers there are
             nemo_cfg.diarizer.clustering.parameters.oracle_num_speakers = True
             logger.info(f"Diarization: num_speakers={num_speakers} (oracle mode)")
         else:
@@ -277,22 +334,27 @@ def diarize(
             if max_speakers is not None and max_speakers > 0:
                 nemo_cfg.diarizer.clustering.parameters.max_num_speakers = max_speakers
                 logger.info(f"Diarization: max_speakers={max_speakers}")
+            else:
+                # Default cap — avoids over-segmentation on short calls
+                nemo_cfg.diarizer.clustering.parameters.max_num_speakers = 8
 
         # 4. Run NeMo NeuralDiarizer
-        logger.info(f"Running NeMo diarization on {audio_path} ...")
+        logger.info(
+            f"Running NeMo diarization on: {audio_path} "
+            f"(device={device.type}, out_dir={job_out_dir})"
+        )
         diarizer = NeuralDiarizer(cfg=nemo_cfg).to(device)
         diarizer.diarize()
 
-        # 5. Parse RTTM output
-        audio_name = os.path.splitext(os.path.basename(wav_path))[0]
-        rttm_path = os.path.join(nemo_out_dir, "pred_rttms", f"{audio_name}.rttm")
-
-        raw_turns = _parse_rttm_file(rttm_path)
+        # 5. Find the RTTM output — NeMo names it after the audio basename
+        #    but we must search the folder because the exact name depends on
+        #    whether we converted the file (may have a _16k suffix or not).
+        raw_turns = _find_and_parse_rttm(job_out_dir)
 
         if not raw_turns:
             logger.warning(
-                "Diarization completed but found zero speaker turns. "
-                "The audio may be too short or contain only one speaker."
+                "Diarization completed but found zero speaker turns in RTTM. "
+                "The audio may be too short or contain only noise."
             )
             return []
 
@@ -309,12 +371,42 @@ def diarize(
         logger.error(f"Diarization failed: {exc}\n{traceback.format_exc()}")
         return []
     finally:
-        # Clean up the converted WAV if we created one
-        if converted_wav and os.path.exists(converted_wav):
-            try:
-                os.unlink(converted_wav)
-            except Exception:
-                pass
+        # Clean up the per-job temp directory entirely
+        try:
+            shutil.rmtree(job_out_dir, ignore_errors=True)
+        except Exception:
+            pass
+
+
+def _find_and_parse_rttm(out_dir: str) -> List[Dict[str, Any]]:
+    """
+    Scan *out_dir*/pred_rttms/ for any ``.rttm`` file and parse the first
+    one found.  This is more robust than constructing the exact filename
+    because NeMo's naming depends on the audio_filepath basename.
+    """
+    rttm_dir = os.path.join(out_dir, "pred_rttms")
+
+    if not os.path.isdir(rttm_dir):
+        logger.warning(f"NeMo pred_rttms directory not found: {rttm_dir}")
+        return []
+
+    rttm_files = [
+        os.path.join(rttm_dir, f)
+        for f in os.listdir(rttm_dir)
+        if f.endswith(".rttm")
+    ]
+
+    if not rttm_files:
+        logger.warning(f"No .rttm files found in: {rttm_dir}")
+        return []
+
+    if len(rttm_files) > 1:
+        logger.warning(
+            f"Multiple RTTM files found in {rttm_dir}; using first: {rttm_files[0]}"
+        )
+
+    logger.info(f"Parsing RTTM: {rttm_files[0]}")
+    return _parse_rttm_file(rttm_files[0])
 
 
 # ---------------------------------------------------------------------------
